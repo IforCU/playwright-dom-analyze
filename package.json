@@ -1,0 +1,30 @@
+{
+  "name": "playwright-dom-analyze",
+  "version": "1.0.0",
+  "description": "Phase 1 webpage DOM understanding prototype using Playwright",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "dev":               "node --env-file=.env src/server.js",
+    "start":             "node --env-file=.env src/server.js",
+    "install:browsers":  "npx playwright install chromium"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/IforCU/playwright-dom-analyze.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "engines": {
+    "node": ">=20"
+  },
+  "bugs": {
+    "url": "https://github.com/IforCU/playwright-dom-analyze/issues"
+  },
+  "homepage": "https://github.com/IforCU/playwright-dom-analyze#readme",
+  "dependencies": {
+    "express": "^4.18.2",
+    "playwright": "^1.44.0"
+  }
+}

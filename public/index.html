@@ -1,0 +1,531 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Analyze Worker</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 48px 16px 80px;
+    }
+
+    h1 {
+      font-size: 1.5rem;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+      margin-bottom: 4px;
+      color: #f8fafc;
+    }
+
+    .subtitle {
+      font-size: 0.85rem;
+      color: #64748b;
+      margin-bottom: 36px;
+    }
+
+    .card {
+      width: 100%;
+      max-width: 640px;
+      background: #1e2230;
+      border: 1px solid #2d3348;
+      border-radius: 12px;
+      padding: 28px;
+    }
+
+    label {
+      display: block;
+      font-size: 0.78rem;
+      font-weight: 500;
+      color: #94a3b8;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-bottom: 6px;
+    }
+
+    .hint {
+      font-size: 0.75rem;
+      color: #475569;
+      margin-top: 4px;
+      margin-bottom: 16px;
+    }
+
+    input[type="url"] {
+      width: 100%;
+      padding: 10px 14px;
+      background: #0f1117;
+      border: 1px solid #2d3348;
+      border-radius: 8px;
+      color: #e2e8f0;
+      font-size: 0.9rem;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+
+    input[type="url"]:focus {
+      border-color: #6366f1;
+    }
+
+    input[type="url"]::placeholder {
+      color: #334155;
+    }
+
+    .row {
+      display: flex;
+      gap: 10px;
+      margin-top: 20px;
+      align-items: center;
+    }
+
+    button {
+      padding: 10px 22px;
+      border-radius: 8px;
+      font-size: 0.88rem;
+      font-weight: 500;
+      border: none;
+      cursor: pointer;
+      transition: opacity 0.15s, background 0.15s;
+    }
+
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    #btn-run {
+      background: #6366f1;
+      color: #fff;
+    }
+
+    #btn-run:not(:disabled):hover { background: #4f46e5; }
+
+    #btn-clear {
+      background: transparent;
+      color: #64748b;
+      border: 1px solid #2d3348;
+    }
+
+    #btn-clear:not(:disabled):hover { color: #94a3b8; border-color: #475569; }
+
+    .status-bar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 28px;
+      font-size: 0.82rem;
+      min-height: 22px;
+      color: #64748b;
+    }
+
+    .dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    .dot-idle     { background: #334155; }
+    .dot-running  { background: #f59e0b; animation: pulse 1s ease-in-out infinite; }
+    .dot-done     { background: #22c55e; }
+    .dot-skipped  { background: #3b82f6; }
+    .dot-stopped  { background: #f97316; }
+    .dot-error    { background: #ef4444; }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.3; }
+    }
+
+    .result-block {
+      margin-top: 20px;
+      background: #0f1117;
+      border: 1px solid #2d3348;
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    .result-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 14px;
+      border-bottom: 1px solid #2d3348;
+      font-size: 0.75rem;
+      color: #64748b;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+    }
+
+    .badge {
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 0.72rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .badge-done     { background: #14532d; color: #4ade80; }
+    .badge-skipped  { background: #1e3a5f; color: #60a5fa; }
+    .badge-stopped  { background: #431407; color: #fb923c; }
+    .badge-error    { background: #450a0a; color: #f87171; }
+
+    pre {
+      padding: 14px;
+      font-size: 0.78rem;
+      line-height: 1.6;
+      font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+      overflow-x: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+      color: #94a3b8;
+      max-height: 480px;
+      overflow-y: auto;
+    }
+
+    .summary-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-top: 16px;
+    }
+
+    .summary-card {
+      background: #0f1117;
+      border: 1px solid #2d3348;
+      border-radius: 8px;
+      padding: 12px 14px;
+    }
+
+    .summary-card .sc-label {
+      font-size: 0.7rem;
+      color: #475569;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-bottom: 6px;
+    }
+
+    .summary-card .sc-value {
+      font-size: 1.4rem;
+      font-weight: 700;
+      color: #e2e8f0;
+      line-height: 1;
+    }
+
+    .summary-card .sc-sub {
+      font-size: 0.7rem;
+      color: #475569;
+      margin-top: 4px;
+    }
+
+    .scope-tag {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 0.72rem;
+      font-weight: 500;
+    }
+
+    .scope-ok   { background: #14532d33; color: #4ade80; border: 1px solid #166534; }
+    .scope-fail { background: #7f1d1d33; color: #f87171; border: 1px solid #991b1b; }
+
+    .divider { height: 1px; background: #2d3348; margin: 20px 0; }
+
+    #history {
+      width: 100%;
+      max-width: 640px;
+      margin-top: 24px;
+    }
+
+    .history-title {
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: #334155;
+      margin-bottom: 10px;
+    }
+
+    .history-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 12px;
+      background: #1e2230;
+      border: 1px solid #2d3348;
+      border-radius: 8px;
+      margin-bottom: 6px;
+      cursor: pointer;
+      font-size: 0.8rem;
+      transition: border-color 0.1s;
+    }
+
+    .history-item:hover { border-color: #475569; }
+
+    .history-item .hi-url {
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: #94a3b8;
+    }
+
+    .history-item .hi-status {
+      font-size: 0.7rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      flex-shrink: 0;
+    }
+
+    .hi-status-done     { color: #4ade80; }
+    .hi-status-skipped  { color: #60a5fa; }
+    .hi-status-stopped  { color: #fb923c; }
+    .hi-status-error    { color: #f87171; }
+  </style>
+</head>
+<body>
+
+<h1>Analyze Worker</h1>
+<p class="subtitle">POST /analyze · 로컬 Playwright DOM 분석기</p>
+
+<div class="card">
+  <label for="inp-original">originalUrl <span style="color:#334155;font-weight:400;text-transform:none">(탐색 범위 루트)</span></label>
+  <input id="inp-original" type="url" placeholder="https://example.com" />
+  <p class="hint">이 URL의 호스트명이 rootHost가 됩니다. 서브도메인은 별도 스코프로 간주합니다.</p>
+
+  <label for="inp-request">requestUrl <span style="color:#334155;font-weight:400;text-transform:none">(분석 대상 · 생략 시 originalUrl과 동일)</span></label>
+  <input id="inp-request" type="url" placeholder="https://example.com/about  (선택)" />
+  <p class="hint" style="margin-bottom:0">생략하면 originalUrl과 동일하게 처리됩니다.</p>
+
+  <div class="row">
+    <button id="btn-run">▶ 분석 실행</button>
+    <button id="btn-clear">초기화</button>
+    <span id="elapsed" style="font-size:0.75rem;color:#475569;margin-left:auto;display:none"></span>
+  </div>
+
+  <div class="status-bar">
+    <span class="dot dot-idle" id="dot"></span>
+    <span id="status-text">대기 중</span>
+  </div>
+
+  <div id="result-area" style="display:none">
+    <div class="divider"></div>
+
+    <!-- Scope summary -->
+    <div id="scope-row" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;font-size:0.8rem;color:#64748b">
+      <span>rootHost: <strong id="rh" style="color:#e2e8f0"></strong></span>
+      <span>·</span>
+      <span>requestHost: <strong id="reqh" style="color:#e2e8f0"></strong></span>
+      <span>·</span>
+      <span id="scope-badge"></span>
+    </div>
+
+    <!-- Summary numbers (only shown for analyzed_new_page) -->
+    <div class="summary-grid" id="summary-grid" style="display:none">
+      <div class="summary-card">
+        <div class="sc-label">DOM 컴포넌트</div>
+        <div class="sc-value" id="s-static">—</div>
+        <div class="sc-sub">정적 노드 추출</div>
+      </div>
+      <div class="summary-card">
+        <div class="sc-label">트리거 실행</div>
+        <div class="sc-value" id="s-trigger">—</div>
+        <div class="sc-sub">후보 <span id="s-trigger-cand">—</span>개 중</div>
+      </div>
+      <div class="summary-card">
+        <div class="sc-label">URL 발견</div>
+        <div class="sc-value" id="s-urls">—</div>
+        <div class="sc-sub">필터 후 <span id="s-urls-filtered">—</span>개</div>
+      </div>
+      <div class="summary-card">
+        <div class="sc-label">큐 준비</div>
+        <div class="sc-value" id="s-queue">—</div>
+        <div class="sc-sub">보류 <span id="s-hold">—</span>개</div>
+      </div>
+    </div>
+
+    <!-- Raw JSON -->
+    <div class="result-block" style="margin-top:16px">
+      <div class="result-header">
+        <span>응답 JSON</span>
+        <span class="badge" id="result-badge"></span>
+      </div>
+      <pre id="result-json"></pre>
+    </div>
+  </div>
+</div>
+
+<!-- History -->
+<div id="history">
+  <div class="history-title">최근 요청</div>
+  <div id="history-list"></div>
+</div>
+
+<script>
+  const btnRun    = document.getElementById('btn-run');
+  const btnClear  = document.getElementById('btn-clear');
+  const inpOrig   = document.getElementById('inp-original');
+  const inpReq    = document.getElementById('inp-request');
+  const dot       = document.getElementById('dot');
+  const statusTxt = document.getElementById('status-text');
+  const elapsed   = document.getElementById('elapsed');
+  const resultArea = document.getElementById('result-area');
+  const summaryGrid = document.getElementById('summary-grid');
+
+  const SESSION_KEY = 'analyze-history';
+  let history = JSON.parse(sessionStorage.getItem(SESSION_KEY) || '[]');
+  renderHistory();
+
+  btnRun.addEventListener('click', run);
+  btnClear.addEventListener('click', clearAll);
+  inpOrig.addEventListener('keydown', (e) => e.key === 'Enter' && run());
+  inpReq.addEventListener('keydown',  (e) => e.key === 'Enter' && run());
+
+  async function run() {
+    const originalUrl = inpOrig.value.trim();
+    if (!originalUrl) { inpOrig.focus(); return; }
+
+    const requestUrl = inpReq.value.trim() || undefined;
+
+    setState('running', '분석 중…');
+    resultArea.style.display = 'none';
+    summaryGrid.style.display = 'none';
+    btnRun.disabled = true;
+
+    const body = requestUrl ? { originalUrl, requestUrl } : { originalUrl };
+    const t0 = Date.now();
+    elapsed.style.display = 'none';
+
+    let data, ok;
+    try {
+      const res = await fetch('/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      data = await res.json();
+      ok   = true;
+    } catch (err) {
+      data = { error: err.message };
+      ok   = false;
+    }
+
+    const ms   = Date.now() - t0;
+    const secs = (ms / 1000).toFixed(1);
+    elapsed.textContent = `${secs}s`;
+    elapsed.style.display = 'inline';
+
+    const status = ok ? (data.status ?? 'error') : 'error';
+    setState(status, statusLabel(data));
+    renderResult(data, status);
+    pushHistory({ originalUrl, requestUrl, status, ms, currentPageStatus: data.currentPageStatus });
+
+    btnRun.disabled = false;
+  }
+
+  function clearAll() {
+    inpOrig.value = '';
+    inpReq.value  = '';
+    resultArea.style.display = 'none';
+    setState('idle', '대기 중');
+    elapsed.style.display = 'none';
+    inpOrig.focus();
+  }
+
+  function setState(s, text) {
+    dot.className = 'dot dot-' + s;
+    statusTxt.textContent = text;
+  }
+
+  function statusLabel(data) {
+    if (!data.currentPageStatus) return data.error ?? '알 수 없는 오류';
+    const map = {
+      analyzed_new_page:             '분석 완료',
+      skipped_existing_page:         '이미 분석됨 (스킵)',
+      stopped_out_of_scope:          '스코프 밖 — 중단',
+      stopped_redirect_out_of_scope: '리다이렉트 탈출 — 중단',
+    };
+    return map[data.currentPageStatus] ?? data.currentPageStatus;
+  }
+
+  function renderResult(data, status) {
+    resultArea.style.display = 'block';
+
+    // rootHost / requestHost
+    document.getElementById('rh').textContent   = data.rootHost    ?? '—';
+    document.getElementById('reqh').textContent = data.requestHost ?? '—';
+
+    const sb = document.getElementById('scope-badge');
+    const allowed = data.currentPageStatus !== 'stopped_out_of_scope'
+                 && data.currentPageStatus !== 'stopped_redirect_out_of_scope';
+    sb.innerHTML = allowed
+      ? '<span class="scope-tag scope-ok">✓ 스코프 내</span>'
+      : '<span class="scope-tag scope-fail">✗ 스코프 밖</span>';
+
+    // Summary grid
+    const p1 = data.summary?.phase1;
+    const p3 = data.summary?.phase3;
+    if (p1 && p3) {
+      summaryGrid.style.display = 'grid';
+      document.getElementById('s-static').textContent        = p1.staticComponentCount  ?? '—';
+      document.getElementById('s-trigger').textContent       = p1.triggerExecutedCount  ?? '—';
+      document.getElementById('s-trigger-cand').textContent  = p1.triggerCandidateCount ?? '—';
+      document.getElementById('s-urls').textContent          = p3.discoveredUrlCount    ?? '—';
+      document.getElementById('s-urls-filtered').textContent = p3.filteredUrlCount      ?? '—';
+      document.getElementById('s-queue').textContent         = p3.queueReadyCount       ?? '—';
+      document.getElementById('s-hold').textContent          = p3.holdCount             ?? '—';
+    }
+
+    // Badge
+    const badge = document.getElementById('result-badge');
+    const badgeClass = { done: 'badge-done', skipped: 'badge-skipped', stopped: 'badge-stopped', error: 'badge-error' }[status] ?? 'badge-error';
+    badge.className = `badge ${badgeClass}`;
+    badge.textContent = status;
+
+    // JSON
+    document.getElementById('result-json').textContent = JSON.stringify(data, null, 2);
+  }
+
+  function pushHistory(item) {
+    history.unshift(item);
+    if (history.length > 20) history.pop();
+    sessionStorage.setItem(SESSION_KEY, JSON.stringify(history));
+    renderHistory();
+  }
+
+  function renderHistory() {
+    const list = document.getElementById('history-list');
+    if (!history.length) { list.innerHTML = ''; return; }
+    list.innerHTML = history.map((h, i) => {
+      const sc = statusColorClass(h.status);
+      const url = h.requestUrl || h.originalUrl;
+      const secs = h.ms ? `${(h.ms/1000).toFixed(1)}s` : '';
+      return `<div class="history-item" data-i="${i}">
+        <span class="dot dot-${h.status}" style="width:7px;height:7px"></span>
+        <span class="hi-url">${esc(url)}</span>
+        <span class="hi-status hi-status-${h.status}">${h.status}</span>
+        <span style="font-size:0.72rem;color:#334155;flex-shrink:0">${secs}</span>
+      </div>`;
+    }).join('');
+    list.querySelectorAll('.history-item').forEach((el) => {
+      el.addEventListener('click', () => {
+        const h = history[+el.dataset.i];
+        inpOrig.value = h.originalUrl;
+        inpReq.value  = h.requestUrl || '';
+      });
+    });
+  }
+
+  function statusColorClass(s) {
+    return { done: 'dot-done', skipped: 'dot-skipped', stopped: 'dot-stopped', error: 'dot-error' }[s] ?? 'dot-idle';
+  }
+
+  function esc(s) {
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+</script>
+</body>
+</html>

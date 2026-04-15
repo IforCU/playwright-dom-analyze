@@ -1,0 +1,11 @@
+[
+  {
+    "ruleId": "example-auth",
+    "match": {
+      "origins": ["https://example.com"],
+      "loginPathPatterns": ["/login", "/signin", "/auth"]
+    },
+    "storageStatePath": "./storage-states/example.json",
+    "action": "reuse-storage-state"
+  }
+]

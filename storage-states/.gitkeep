@@ -1,0 +1,4 @@
+# storage-states 디렉토리
+# Playwright storageState 파일(.json)을 여기에 저장합니다.
+# auth-rules.json의 storageStatePath 필드가 이 디렉토리의 파일을 참조합니다.
+# 이 파일들은 민감한 인증 데이터를 포함하므로 .gitignore에 추가하세요.
