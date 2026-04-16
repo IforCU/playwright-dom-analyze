@@ -47,11 +47,21 @@ import { annotateScreenshot }                                      from '../anno
 import { compareNodeSets, extractNewRegions }                      from '../compare.js';
 import { sleep }                                                   from '../utils.js';
 import { isInAutoDynamicRegion, freezeCssAnimations }              from './autoDynamicDetector.js';
+import { classifyAuthNavigation, collectNavPageMeta }               from './authNavigationClassifier.js';
 
-// ── Config ─────────────────────────────────────────────────────────────────
+// ── Config (env-configurable) ───────────────────────────────────────────────
+// Maximum total time (ms) to wait for DOM mutations to settle after a trigger.
+const TRIGGER_SETTLE_MAX_MS = parseInt(process.env.TRIGGER_SETTLE_MAX_MS || '5000', 10);
+// Mutations must be quiet for this many ms before we consider the render done.
+const TRIGGER_QUIET_MS      = parseInt(process.env.TRIGGER_QUIET_MS      || '600',  10);
+// Initial wait (ms) after the action before polling starts
+// (lets the browser start the first mutations before we measure).
+const TRIGGER_INITIAL_MS    = parseInt(process.env.TRIGGER_INITIAL_MS    || '200',  10);
+// Network-idle fallback timeout (ms) after mutations settle.
+const TRIGGER_NETWORK_MS    = parseInt(process.env.TRIGGER_NETWORK_MS    || '2500', 10);
 
-const TRIGGER_SETTLE_MS = 2_000;
-const NAV_TIMEOUT_MS    = 4_000;
+// Viewport width used to detect full-width layout wrappers in newNodes.
+const VIEWPORT_WIDTH = 1920;
 
 // ── Main export ─────────────────────────────────────────────────────────────
 
@@ -78,7 +88,17 @@ export async function runTrigger(browser, url, candidate, outDir, opts = {}) {
     // Optional CSS stabilisation: pauses animations before trigger execution.
     // Reduces animation-driven mutation noise.  Does not replace classification.
     freezeCss                       = false,
+    // Auth-navigation classification: when enabled, a brief page-load wait is
+    // added inside the navigation fast-exit path so we can collect title, text,
+    // and form signals before closing the context.
+    authDetectionEnabled            = true,
+    authScoreThreshold              = 5,
+    authMaybeThreshold              = 3,
   } = opts;
+
+  // Derive rootHost from the page URL. requestUrl has already been validated
+  // as being on rootHost before it reaches here, so this is always accurate.
+  const rootHost = new URL(url).hostname;
 
   const { triggerId, triggerType, bbox } = candidate;
   const resultsDir = path.join(outDir, 'trigger-results');
@@ -118,48 +138,155 @@ export async function runTrigger(browser, url, candidate, outDir, opts = {}) {
     try {
       if (triggerType === 'hover') {
         await page.mouse.move(cx, cy, { steps: 5 });
+        // Brief pause lets CSS :hover transitions begin before we start polling.
         await sleep(300);
       } else {
         await page.mouse.click(cx, cy, { delay: 60 });
       }
-      await sleep(TRIGGER_SETTLE_MS);
+      // Wait until DOM mutations triggered by the action have settled.
+      // This replaces the old fixed sleep — the page signals us when it's done.
+      await waitForSettledMutations(page);
+      // Secondary signal: wait for any async fetch that the action may have
+      // triggered (e.g. lazy-loaded panel content).  Failure is non-fatal.
       await page
-        .waitForLoadState('domcontentloaded', { timeout: NAV_TIMEOUT_MS })
+        .waitForLoadState('networkidle', { timeout: TRIGGER_NETWORK_MS })
         .catch(() => {});
     } catch (err) {
       actionError = err.message;
     }
 
-    // ── 3b. Navigation-away fast exit ─────────────────────────────────────────
-    // If the trigger caused a page navigation (URL changed) we know that:
-    //   • The execution context is destroyed — further evaluate() calls will fail
-    //   • There are no in-page newNodes to report
-    //   • Any remaining wait time would be wasted (~20 s)
-    // Return immediately with status 'navigated_away' so the parallel pool
-    // can reclaim this worker slot without burning through the settle timeout.
+    // ── 3b. Navigation-aware fast exit ────────────────────────────────────────
+    // If the trigger caused a page navigation (URL changed):
+    //   • The execution context is likely destroyed — evaluate() will fail
+    //   • There are no in-page newNodes to report from the original page
+    //   • Any remaining settle wait would be wasted (~20 s)
+    //
+    // Improvement over a plain discard:
+    //   1. Briefly wait for the NEW page's domcontentloaded (max 2.5 s)
+    //   2. Collect title, visible text, form structure from the new page
+    //   3. Run auth classification to distinguish:
+    //        • normal in-scope page navigation
+    //        • same-host login page
+    //        • external auth provider (IdP)
+    //        • true out-of-scope navigation
+    //   4. Close context and return enriched result
     const pageUrlAfter = page.url();
     if (pageUrlAfter !== url) {
+      const isCrossHost = new URL(pageUrlAfter).hostname !== rootHost;
+
+      // Collect nav page metadata for richer auth classification.
+      // We allow up to 2.5 s for domcontentloaded; if it times out or fails
+      // we still classify using URL signals alone.
+      let navMeta = { pageTitle: '', visibleText: '', forms: {} };
+      if (authDetectionEnabled) {
+        await page
+          .waitForLoadState('domcontentloaded', { timeout: 2500 })
+          .catch(() => {});
+        navMeta = await collectNavPageMeta(page).catch(() => navMeta);
+      }
+
+      const navClass = classifyAuthNavigation({
+        finalUrl: pageUrlAfter,
+        rootHost,
+        pageTitle:   navMeta.pageTitle,
+        visibleText: navMeta.visibleText,
+        forms:       navMeta.forms,
+        isCrossHost,
+        opts: { authScoreThreshold, authMaybeThreshold },
+      });
+
       await context.close();
       return {
         triggerId,
-        action:              triggerType,
-        status:              'navigated_away',
+        action:               triggerType,
+        status:               navClass.navigationStatus,
         screenshotMode,
-        beforeScreenshot:    null,
-        afterScreenshot:     null,
-        annotatedScreenshot: null,
-        mutationCount:       0,
-        mutations:           [],
-        newNodes:            [],
+        beforeScreenshot:     null,
+        afterScreenshot:      null,
+        annotatedScreenshot:  null,
+        mutationCount:        0,
+        mutations:            [],
+        newNodes:             [],
         backgroundNoiseCount: 0,
-        newRegions:          [],
-        navigatedToUrl:      pageUrlAfter,
-        summary:             `Trigger caused page navigation to ${pageUrlAfter}`,
+        newRegions:           [],
+        navigationDetected:   true,
+        navigatedToUrl:       pageUrlAfter,
+        navigatedToHost:      navClass.navigatedToHost,
+        navigatedToPath:      navClass.navigatedToPath,
+        authDetected:         navClass.authDetected,
+        requiresAuth:         navClass.requiresAuth,
+        authScore:            navClass.authScore,
+        authConfidence:       navClass.authConfidence,
+        authSignals:          navClass.authSignals,
+        navigationReason:     navClass.navigationReason,
+        classificationSource: navClass.classificationSource,
+        summary:              navClass.navigationReason,
       };
     }
 
     // ── 4. After-state DOM snapshot ───────────────────────────────────────────
-    const { nodes: afterNodes } = await extractStaticNodes(page);
+    // Guard against a late-detected navigation: page.url() (checked above) can
+    // still return the original URL in the brief window between the navigation
+    // being initiated and the URL being updated.  If extractStaticNodes() then
+    // runs while the execution context is being torn down, it throws
+    // "Execution context was destroyed".  Catch that and re-route to the same
+    // navigation-result path used above.
+    let afterNodes;
+    try {
+      ({ nodes: afterNodes } = await extractStaticNodes(page));
+    } catch (extractErr) {
+      const lateUrl = page.url();
+      const isLateNav =
+        lateUrl !== url ||
+        extractErr.message.includes('Execution context was destroyed') ||
+        extractErr.message.includes('context or browser has been closed');
+      if (!isLateNav) throw extractErr;
+
+      // Re-use the same nav-classification path
+      const navTarget  = lateUrl !== url ? lateUrl : url;
+      const isCrossHost = new URL(navTarget).hostname !== rootHost;
+      let navMeta = { pageTitle: '', visibleText: '', forms: {} };
+      if (authDetectionEnabled) {
+        await page.waitForLoadState('domcontentloaded', { timeout: 2500 }).catch(() => {});
+        navMeta = await collectNavPageMeta(page).catch(() => navMeta);
+      }
+      const navClass = classifyAuthNavigation({
+        finalUrl:    navTarget,
+        rootHost,
+        pageTitle:   navMeta.pageTitle,
+        visibleText: navMeta.visibleText,
+        forms:       navMeta.forms,
+        isCrossHost,
+        opts: { authScoreThreshold, authMaybeThreshold },
+      });
+      await context.close();
+      return {
+        triggerId,
+        action:               triggerType,
+        status:               navClass.navigationStatus,
+        screenshotMode,
+        beforeScreenshot:     null,
+        afterScreenshot:      null,
+        annotatedScreenshot:  null,
+        mutationCount:        0,
+        mutations:            [],
+        newNodes:             [],
+        backgroundNoiseCount: 0,
+        newRegions:           [],
+        navigationDetected:   true,
+        navigatedToUrl:       navTarget,
+        navigatedToHost:      navClass.navigatedToHost,
+        navigatedToPath:      navClass.navigatedToPath,
+        authDetected:         navClass.authDetected,
+        requiresAuth:         navClass.requiresAuth,
+        authScore:            navClass.authScore,
+        authConfidence:       navClass.authConfidence,
+        authSignals:          navClass.authSignals,
+        navigationReason:     navClass.navigationReason,
+        classificationSource: navClass.classificationSource,
+        summary:              `Late-detected navigation: ${navClass.navigationReason}`,
+      };
+    }
 
     // ── 5. Collect mutations ──────────────────────────────────────────────────
     await installMutationTracker(page).catch(() => {});
@@ -167,18 +294,36 @@ export async function runTrigger(browser, url, candidate, outDir, opts = {}) {
 
     // ── 6. Compare before / after ─────────────────────────────────────────────
     const { newNodes: rawNewNodes } = compareNodeSets(beforeNodes, afterNodes);
-    // Filter out nodes that overlap known auto-dynamic regions.
-    // These represent background changes (e.g. carousel slide rotation) that
-    // happened independently of the trigger and would inflate newNodes counts.
-    const newNodes = autoDynamicRegions.length
-      ? rawNewNodes.filter(
-          (n) => !isInAutoDynamicRegion(n.bbox, autoDynamicRegions, autoDynamicOverlapThreshold),
-        )
-      : rawNewNodes;
+
+    // ── Noise filters ──────────────────────────────────────────────────────────
+    //
+    // 1. Full-width layout wrappers: nodes that span ≥90 % of the viewport width
+    //    and start at x≈0, y≈0 appear as "new" only because they were
+    //    re-measured at a different height after the trigger (the root content
+    //    div grew to accommodate an injected panel).  They carry no UI signal.
+    //
+    // 2. Auto-dynamic regions: nodes that overlap known background-cycling areas
+    //    (e.g. carousel slides, news tickers) are background noise unrelated to
+    //    the trigger.  Removed when autoDynamicRegions were detected earlier.
+    const newNodes = rawNewNodes
+      .filter((n) => !(n.bbox.x <= 4 && n.bbox.y <= 4 && n.bbox.width >= VIEWPORT_WIDTH * 0.9))
+      .filter(
+        autoDynamicRegions.length
+          ? (n) => !isInAutoDynamicRegion(n.bbox, autoDynamicRegions, autoDynamicOverlapThreshold)
+          : () => true,
+      );
     const backgroundNoiseCount = rawNewNodes.length - newNodes.length;
     const newRegions   = extractNewRegions(newNodes);
 
-    // ── 7. Screenshots (mode-dependent) ──────────────────────────────────────
+    // ── 7. Screenshots (mode-dependent) ──────────────────────────────────────    // Wait for visual rendering to be fully committed before capturing.
+    // DOM mutations settling (step 3) guarantees the DOM tree is correct but
+    // the browser may still be:
+    //   • running CSS transitions/animations (e.g. dropdown slide-in, fade-in)
+    //   • calculating layout / painting the updated pixels
+    // We wait for the “loudest” in-flight transition to end (max 800 ms) then
+    // flush layout+paint with a double requestAnimationFrame before injecting
+    // the red-box overlay and taking the final screenshot.
+    await _waitForVisualRender(page);
     const afterPath     = path.join(resultsDir, `${triggerId}-after.png`);
     const annotatedPath = path.join(resultsDir, `${triggerId}-annotated.png`);
     await _captureAfterScreenshots(
@@ -254,41 +399,57 @@ async function _captureAfterScreenshots(page, newNodes, afterPath, annotatedPath
     }
 
     case 'viewport': {
-      // Viewport-only: cheap, no region clipping
+      // Viewport-only: cheap, no region clipping.
+      // Annotated uses the same viewport shot but with red-box overlay injected.
       await page.screenshot({ path: afterPath, fullPage: false });
-      await fs.copyFile(afterPath, annotatedPath);
+      if (newNodes.length > 0) {
+        await annotateScreenshot(page, newNodes.slice(0, 60), annotatedPath, { fullPage: false });
+      } else {
+        await fs.copyFile(afterPath, annotatedPath);
+      }
       break;
     }
 
     case 'element':
     case 'changedRegion':
     default: {
-      // Viewport after-shot (fast); clipped annotated if changes found
+      // Viewport after-shot (fast).
+      // Annotated: inject red-box overlay then clip to the union bbox of changed
+      // nodes so the result shows exactly the changed region with boxes visible.
       await page.screenshot({ path: afterPath, fullPage: false });
       if (newNodes.length > 0) {
-        await _captureClippedOrCopy(page, newNodes, annotatedPath, fallback, afterPath);
+        const clip = _computeUnionBbox(newNodes, 24);
+        if (clip) {
+          // bbox coords from extractStaticNodes are document-absolute
+          // (rect.x + scrollX, rect.y + scrollY).
+          //
+          // For a viewport screenshot (fullPage:false) Playwright interprets the
+          // clip in *viewport* coordinates, so the clip must fit within
+          // [0, viewportWidth] × [0, viewportHeight].
+          //
+          // Trigger pages always start at scroll(0,0), so document-absolute and
+          // viewport-relative are identical — UNLESS a changed node sits below
+          // the viewport fold (e.g. a carousel at y=1960 on a 1080 px viewport).
+          // In that case we switch to fullPage:true so the clip is resolved
+          // against the full document instead.
+          const vp = page.viewportSize() ?? { width: 1920, height: 1080 };
+          const clipFitsViewport =
+            clip.x >= 0 &&
+            clip.y >= 0 &&
+            clip.x + clip.width  <= vp.width &&
+            clip.y + clip.height <= vp.height;
+          const screenshotOpts = clipFitsViewport
+            ? { clip }
+            : { fullPage: true, clip };
+          await annotateScreenshot(page, newNodes.slice(0, 60), annotatedPath, screenshotOpts);
+        } else {
+          await annotateScreenshot(page, newNodes.slice(0, 60), annotatedPath, { fullPage: false });
+        }
       } else {
         await fs.copyFile(afterPath, annotatedPath);
       }
       break;
     }
-  }
-}
-
-/**
- * Clip screenshot to the union bounding box of changed nodes (+ padding).
- * Falls back to copying afterPath if clipping fails or bbox is degenerate.
- */
-async function _captureClippedOrCopy(page, nodes, outPath, fallback, afterPath) {
-  const clip = _computeUnionBbox(nodes, 24);
-  if (!clip) {
-    await fs.copyFile(afterPath, outPath);
-    return;
-  }
-  try {
-    await page.screenshot({ path: outPath, clip });
-  } catch {
-    if (fallback) await fs.copyFile(afterPath, outPath);
   }
 }
 
@@ -318,6 +479,101 @@ function _computeUnionBbox(nodes, padding = 0) {
 }
 
 // ── Other private helpers ─────────────────────────────────────────────────────
+
+/**
+ * Wait until the browser has fully painted the page after a trigger action.
+ *
+ * Two-phase:
+ *   Phase A — CSS transition drain
+ *     Reads the longest `transition-duration` currently active on any element
+ *     that gained a transition during the action (identified by a non-zero
+ *     computed transition-duration).  Waits that long, capped at 800 ms.
+ *     This covers dropdown slide-ins, fade-ins, and similar CSS animations that
+ *     start AFTER the DOM mutation settles.
+ *
+ *   Phase B — paint flush
+ *     Schedules two consecutive requestAnimationFrame callbacks.  The browser
+ *     guarantees it has finished layout + compositing by the time the second
+ *     rAF fires, so any pending repaints from the DOM change are committed.
+ *
+ * Falls back gracefully if page.evaluate rejects (context torn down).
+ */
+async function _waitForVisualRender(page) {
+  // Phase A: find the longest ongoing CSS transition and wait it out.
+  const maxTransitionMs = await page.evaluate(() => {
+    let maxMs = 0;
+    try {
+      for (const el of document.querySelectorAll('*')) {
+        const s = window.getComputedStyle(el);
+        // transition-duration can be a comma-separated list ("0.3s, 0.1s")
+        for (const token of (s.transitionDuration || '').split(',')) {
+          const t = token.trim();
+          const ms = t.endsWith('ms')
+            ? parseFloat(t)
+            : t.endsWith('s') ? parseFloat(t) * 1000 : 0;
+          if (ms > maxMs) maxMs = ms;
+        }
+      }
+    } catch (_) {}
+    return Math.min(maxMs, 800); // cap at 800 ms
+  }).catch(() => 0);
+
+  if (maxTransitionMs > 0) {
+    await sleep(maxTransitionMs);
+  }
+
+  // Phase B: double-rAF paint flush — ensures layout + paint are committed.
+  await page.evaluate(
+    () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
+  ).catch(() => {});
+}
+
+/**
+ * Wait until DOM mutations triggered by an action have settled.
+ *
+ * Strategy:
+ *   1. Wait TRIGGER_INITIAL_MS first (allows the first mutations to arrive
+ *      before we start measuring — without this, we'd see count=0 immediately
+ *      and declare the page settled before anything changed).
+ *   2. Poll the in-page MutationObserver buffer every 150 ms.
+ *   3. Once the count has stayed the same for TRIGGER_QUIET_MS, the DOM has
+ *      settled and we return early.
+ *   4. Give up after TRIGGER_SETTLE_MAX_MS total (TRIGGER_INITIAL_MS included).
+ *
+ * Falls back gracefully when the tracker is not installed or the context
+ * is being torn down (page.evaluate rejects → bail immediately).
+ *
+ * This replaces the old fixed sleep(2000) approach: a heavy page that fires
+ * 80 mutations over 3 s will now be waited out; a lightweight hover that
+ * finishes in 400 ms will exit after ~600 ms quiet instead of wasting 2 s.
+ */
+async function waitForSettledMutations(page) {
+  const POLL_MS = 150;
+  await sleep(TRIGGER_INITIAL_MS);
+
+  const deadline  = Date.now() + TRIGGER_SETTLE_MAX_MS - TRIGGER_INITIAL_MS;
+  let lastCount   = -1;
+  let quietSince  = Date.now();
+
+  while (Date.now() < deadline) {
+    const count = await page.evaluate(
+      () => typeof window.__getMutations__ === 'function'
+        ? window.__getMutations__().length
+        : -1,
+    ).catch(() => -1);
+
+    if (count < 0) break; // context destroyed or tracker missing — bail
+
+    if (count !== lastCount) {
+      lastCount  = count;
+      quietSince = Date.now(); // reset the quiet clock
+    } else if (Date.now() - quietSince >= TRIGGER_QUIET_MS) {
+      break; // settled — no new mutations for TRIGGER_QUIET_MS ms
+    }
+
+    await sleep(POLL_MS);
+  }
+}
 
 function _unix(p) {
   return p.replace(/\\/g, '/');

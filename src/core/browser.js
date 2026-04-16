@@ -46,12 +46,12 @@ export async function launchBrowser() {
 }
 
 /**
- * Create a fresh BrowserContext with a fixed 1280×800 viewport.
+ * Create a fresh BrowserContext with a 1920×1080 (FHD) viewport.
  * Use one context per page/task so state never bleeds across analyses.
  */
 export async function createFreshContext(browser) {
   return browser.newContext({
-    viewport: { width: 1280, height: 800 },
+    viewport: { width: 1920, height: 1080 },
     userAgent:
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
       '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',

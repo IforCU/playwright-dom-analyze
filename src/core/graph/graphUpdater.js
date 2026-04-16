@@ -41,7 +41,7 @@ export function findNode(graph, dedupKey) {
  * @param {{ hostname, normalizedPath, dedupKey, representativeUrl, jobId }} opts
  * @returns {{ node: object, created: boolean }}
  */
-export function upsertNode(graph, { hostname, normalizedPath, dedupKey, representativeUrl, jobId }) {
+export function upsertNode(graph, { hostname, normalizedPath, dedupKey, representativeUrl, jobId, authGated = false }) {
   const existing = graph.nodes[dedupKey];
   if (existing) {
     existing.lastSeenAt = new Date().toISOString();
@@ -51,10 +51,14 @@ export function upsertNode(graph, { hostname, normalizedPath, dedupKey, represen
     if (!existing.discoveredVariants.includes(representativeUrl)) {
       existing.discoveredVariants.push(representativeUrl);
     }
+    // Promote authGated flag if new discovery reveals auth nature
+    if (authGated && !existing.authGated) {
+      existing.authGated = true;
+    }
     return { node: existing, created: false };
   }
 
-  const node = createNode({ hostname, normalizedPath, dedupKey, representativeUrl, jobId });
+  const node = createNode({ hostname, normalizedPath, dedupKey, representativeUrl, jobId, authGated });
   graph.nodes[dedupKey] = node;
   return { node, created: true };
 }
@@ -99,7 +103,10 @@ export function updateNodeReachability(graph, dedupKey, reachabilityStatus) {
  * @param {{ fromNodeId, toNodeId, jobId, discoverySource, triggerId?, representativeUrl }} opts
  * @returns {{ edge: object, created: boolean }}
  */
-export function upsertEdge(graph, { fromNodeId, toNodeId, jobId, discoverySource, triggerId, representativeUrl }) {
+export function upsertEdge(graph, {
+  fromNodeId, toNodeId, jobId, discoverySource, triggerId,
+  representativeUrl, edgeType, requiresAuth, authDetected, authScore, navigationStatus,
+}) {
   // Linear scan — acceptable for a local toy-project graph
   const existing = Object.values(graph.edges).find(
     (e) => e.fromNodeId === fromNodeId && e.toNodeId === toNodeId,
@@ -108,7 +115,10 @@ export function upsertEdge(graph, { fromNodeId, toNodeId, jobId, discoverySource
     return { edge: existing, created: false };
   }
 
-  const edge = createEdge({ fromNodeId, toNodeId, jobId, discoverySource, triggerId, representativeUrl });
+  const edge = createEdge({
+    fromNodeId, toNodeId, jobId, discoverySource, triggerId,
+    representativeUrl, edgeType, requiresAuth, authDetected, authScore, navigationStatus,
+  });
   graph.edges[edge.edgeId] = edge;
   return { edge, created: true };
 }

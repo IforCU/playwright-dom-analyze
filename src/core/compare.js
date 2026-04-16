@@ -4,9 +4,18 @@
  * Compares two snapshots of DOM nodes (before vs after a trigger action)
  * to identify newly appeared elements and meaningful new bounding regions.
  *
- * Identity fingerprint: tagName + viewport position + dimensions.
- * Elements that share the same tag and bounding box across snapshots are
- * considered the same element.
+ * Identity fingerprint strategy (two-tier):
+ *
+ *   Tier 1 — ID-based: when selectorHint starts with '#', the element is
+ *     uniquely identified by its id.  Position is ignored so that layout
+ *     reflows (the element moves but keeps its id) do not create false
+ *     positives.  Size is still included so a genuinely replaced element
+ *     (same id, different dimensions) is still detected.
+ *
+ *   Tier 2 — Position-based: for all other elements, uses tagName + bbox
+ *     rounded to the nearest 2 px.  The 2-pixel tolerance absorbs sub-pixel
+ *     rendering differences between the before- and after-snapshots without
+ *     masking meaningful position changes.
  */
 
 /**
@@ -44,6 +53,19 @@ export function extractNewRegions(newNodes) {
 
 /** Stable identity string for a node based on position and tag */
 function fingerprint(node) {
+  // Tier 1 — ID-based identity.
+  // An element identified by a unique id is the same element regardless of
+  // where it moved on the page (layout reflows, pushed-down content, etc.).
+  // We still embed rounded width+height so a genuinely replaced element with
+  // the same id but different dimensions is not silently discarded.
+  if (node.selectorHint && node.selectorHint.startsWith('#')) {
+    const { width, height } = node.bbox;
+    return `id:${node.selectorHint}|${Math.round(width / 2) * 2}|${Math.round(height / 2) * 2}`;
+  }
+
+  // Tier 2 — Position-based identity.
+  // Round all coordinates to the nearest 2 px to absorb sub-pixel rendering
+  // differences (anti-aliasing, fractional DPR) without masking real changes.
   const { x, y, width, height } = node.bbox;
-  return `${node.tagName}|${x}|${y}|${width}|${height}`;
+  return `${node.tagName}|${Math.round(x / 2) * 2}|${Math.round(y / 2) * 2}|${Math.round(width / 2) * 2}|${Math.round(height / 2) * 2}`;
 }

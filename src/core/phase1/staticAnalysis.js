@@ -69,6 +69,17 @@ export async function extractStaticNodes(page, opts = {}) {
     // Semantic class/id hint patterns → bonus
     const SEMANTIC_HINT_RE = /\b(header|nav|menu|sidebar|content|article|modal|dialog|popup|tooltip|tab|panel|card|list|item|breadcrumb|pagination|search|filter|dropdown|banner|hero|section|footer|wrapper|container|layout)\b/i;
 
+    // ── PART 5: Focus score patterns ──────────────────────────────────────────
+    // Tags that strongly signal human-meaningful interactive content
+    const INTERACTIVE_TAGS    = new Set(['a','button','input','select','textarea','summary','label','details']);
+    const MEDIA_TAGS           = new Set(['img','video','canvas','svg','picture','iframe']);
+    const STRUCTURAL_TAGS      = new Set(['form','table','ul','ol','dl','nav','header','main','footer','section','article','aside','dialog']);
+    const HEADING_TAGS         = new Set(['h1','h2','h3','h4','h5','h6']);
+    // Class/id patterns that penalize ad / low-value nodes
+    const AD_KW_RE             = /\b(ad|ads|advert|adsense|adroll|banner-ad|sponsored|promo-box|tracking|pixel|beacon)\b/i;
+    // Class/id patterns that reward semantically meaningful nodes
+    const CONTENT_KW_RE        = /\b(hero|feature|highlight|product|card|item|result|article|post|news|story|listing|search|form|filter|tab|accordion|modal|dialog|price|rating|review|breadcrumb|pagination|cta|action)\b/i;
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     function buildSelectorHint(el) {
@@ -240,10 +251,150 @@ export async function extractStaticNodes(page, opts = {}) {
       return { score, reasons };
     }
 
+    /**
+     * PART 5 — Compute a human-aligned focus score for a visible element.
+     *
+     * The focus score estimates how likely a human reviewer would consider this
+     * element meaningful / worth inspecting.  It is independent of the quality
+     * gate (which controls keep/drop); it is stored as focusScore on every kept
+     * node and used to:
+     *   - improve annotation priority (high-focus nodes annotated first)
+     *   - improve trigger candidate ranking
+     *   - surface quality warnings in the report when focus is dominated by
+     *     low-value nodes
+     *
+     * Score range: typically −4 to +10.  Positive = meaningful.
+     *
+     * Factors:
+     *   Visual importance:     size, centrality, viewport position
+     *   Semantic importance:   tag category, role, heading, form, landmark
+     *   Interactivity:         interactive tag, pointer cursor, focusable
+     *   Content richness:      text length, child count, content keyword hints
+     *   Noise penalties:       ad keyword, purely decorative, off-center tiny
+     */
+    function computeFocusScore(el, tag, rect, directText, role, style) {
+      let score       = 0;
+      const reasons   = [];
+      const vw        = window.innerWidth  || 1920;
+      const vh        = window.innerHeight || 1080;
+      const area      = rect.width * rect.height;
+
+      // ── Visual importance ──────────────────────────────────────────────────
+      // Large visible area
+      if (area >= 60_000) { score += 2; reasons.push('vis_large'); }
+      else if (area >= 10_000) { score += 1; reasons.push('vis_medium'); }
+
+      // Upper 60 % of viewport — primary reading zone
+      const relTop = rect.top / vh;
+      if (relTop < 0.6 && rect.top >= 0) { score += 1; reasons.push('vis_above_fold'); }
+
+      // Horizontally central (between 10 % – 90 % viewport width)
+      const relLeft  = rect.left  / vw;
+      const relRight = rect.right / vw;
+      if (relLeft > 0.05 && relRight < 0.95) { score += 1; reasons.push('vis_central'); }
+
+      // ── Semantic importance ────────────────────────────────────────────────
+      if (INTERACTIVE_TAGS.has(tag))   { score += 3; reasons.push('sem_interactive'); }
+      else if (HEADING_TAGS.has(tag))  { score += 3; reasons.push('sem_heading');     }
+      else if (MEDIA_TAGS.has(tag))    { score += 2; reasons.push('sem_media');       }
+      else if (STRUCTURAL_TAGS.has(tag)) { score += 1; reasons.push('sem_structural'); }
+
+      if (role === 'dialog' || role === 'alertdialog') { score += 2; reasons.push('sem_dialog'); }
+      if (role === 'navigation')                        { score += 1; reasons.push('sem_nav');    }
+      if (role === 'search')                            { score += 2; reasons.push('sem_search'); }
+      if (role === 'form' || role === 'main')           { score += 1; reasons.push('sem_landmark');}
+
+      // Meaningful class/id keyword
+      const hint = [typeof el.className === 'string' ? el.className : '', el.id || ''].join(' ');
+      if (CONTENT_KW_RE.test(hint)) { score += 1; reasons.push('sem_content_kw'); }
+
+      // ── Content richness ───────────────────────────────────────────────────
+      if (directText.length >= 20) { score += 2; reasons.push('rich_text'); }
+      else if (directText.length >= cfg.minTextLength) { score += 1; reasons.push('has_text'); }
+
+      const childCount = el.children.length;
+      if (childCount >= 5) { score += 1; reasons.push('rich_children'); }
+
+      // ── Interactivity ──────────────────────────────────────────────────────
+      if (style.cursor === 'pointer')  { score += 1; reasons.push('int_pointer'); }
+      if (el.tabIndex >= 0 && !INTERACTIVE_TAGS.has(tag)) {
+        score += 1; reasons.push('int_focusable');
+      }
+
+      // ── Noise penalties ────────────────────────────────────────────────────
+      if (AD_KW_RE.test(hint))        { score -= 3; reasons.push('noise_ad_kw');     }
+      if (area < 400)                  { score -= 1; reasons.push('noise_tiny');      }
+      if (childCount === 0 && directText.length < cfg.minTextLength && !INTERACTIVE_TAGS.has(tag) && !MEDIA_TAGS.has(tag)) {
+        score -= 2; reasons.push('noise_empty_leaf');
+      }
+      // Purely decorative fixed element (very high z-index but tiny)
+      const zIndex = parseInt(style.zIndex) || 0;
+      if (zIndex > 1000 && area < 2000) { score -= 2; reasons.push('noise_decorative_fixed'); }
+
+      return { focusScore: score, focusReasons: reasons };
+    }
+
+    /**
+     * Check whether an element is visually clipped outside an overflow:hidden
+     * ancestor's visible rect (e.g. items in a horizontal carousel that are
+     * scrolled off the visible portion of the container).
+     *
+     * Walks up to 5 parent levels and checks if the element's rect overlaps
+     * with any overflow:hidden / overflow:clip ancestor.  Returns true when
+     * the element is fully outside such an ancestor's visible area.
+     *
+     * IMPORTANT: We stop the walk when we hit a parent with position:absolute
+     * or position:fixed, because that parent is the CSS containing block for
+     * any absolute/fixed descendants inside it.  overflow:hidden on ancestors
+     * *above* that containing block does not clip elements within it.
+     * This prevents dropdown panels and tooltips (which live inside an
+     * overflow:hidden menu container but are absolutely positioned) from being
+     * incorrectly filtered out.
+     */
+    function isClippedByParent(el, elRect) {
+      // position:fixed elements are never clipped by any overflow:hidden ancestor.
+      // position:absolute elements are only clipped up to their containing block;
+      // we handle this via the break inside the walk below, so no early return
+      // is needed here — but fixed is always safe to skip.
+      const elPos = window.getComputedStyle(el).position;
+      if (elPos === 'fixed') return false;
+
+      let parent = el.parentElement;
+      let depth  = 0;
+      while (parent && parent !== document.body && parent !== document.documentElement && depth < 5) {
+        const pStyle = window.getComputedStyle(parent);
+        // A parent with position:absolute or position:fixed is the CSS
+        // containing block boundary.  overflow:hidden on ancestors above this
+        // parent does not clip our element, so stop the walk here.
+        const pPos = pStyle.position;
+        if (pPos === 'absolute' || pPos === 'fixed') break;
+
+        const ovX = pStyle.overflowX;
+        const ovY = pStyle.overflowY;
+        const clips = (ovX === 'hidden' || ovX === 'clip' || ovY === 'hidden' || ovY === 'clip');
+        if (clips) {
+          const pr = parent.getBoundingClientRect();
+          // Element is fully outside the clipping ancestor → visually invisible
+          if (
+            elRect.right  <= pr.left  ||
+            elRect.left   >= pr.right ||
+            elRect.bottom <= pr.top   ||
+            elRect.top    >= pr.bottom
+          ) {
+            return true;
+          }
+        }
+        parent = parent.parentElement;
+        depth++;
+      }
+      return false;
+    }
+
     // ── Main extraction loop ──────────────────────────────────────────────────
 
     const scrollX = window.scrollX;
     const scrollY = window.scrollY;
+    const vw      = window.innerWidth;
     const nodes       = [];
     const droppedNodes = [];
     let counter = 0;
@@ -251,9 +402,19 @@ export async function extractStaticNodes(page, opts = {}) {
     for (const el of document.querySelectorAll('*')) {
       const tag = el.tagName.toLowerCase();
       if (SKIP_TAGS.has(tag)) continue;
+      // Always skip the body element — it is too coarse to be a useful component
+      if (el === document.body) continue;
 
       const rect = el.getBoundingClientRect();
       if (rect.width < 2 || rect.height < 2) continue;
+
+      // Skip elements whose horizontal extent lies completely outside the
+      // viewport (e.g. off-screen carousel items clipped by overflow:hidden).
+      if (rect.right < 0 || rect.left > vw) continue;
+
+      // Skip elements that are visually invisible because a parent with
+      // overflow:hidden clips them outside that parent's visible rect.
+      if (isClippedByParent(el, rect)) continue;
 
       const style = window.getComputedStyle(el);
       if (style.display === 'none')         continue;
@@ -287,6 +448,9 @@ export async function extractStaticNodes(page, opts = {}) {
       }
       // High-value tags always pass — no quality gate
 
+      // ── PART 5: Focus score (all nodes) ───────────────────────────────────
+      const { focusScore, focusReasons } = computeFocusScore(el, tag, rect, text, role, style);
+
       const nodeData = {
         nodeId:        `node-${++counter}`,
         tagName:       tag,
@@ -302,6 +466,8 @@ export async function extractStaticNodes(page, opts = {}) {
         group:         classifyElement(el),
         qualityScore,
         qualityReasons,
+        focusScore,
+        focusReasons,
       };
 
       if (keep) {

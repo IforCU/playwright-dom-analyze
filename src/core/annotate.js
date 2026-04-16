@@ -13,11 +13,17 @@
  * @param {import('playwright').Page} page  - Live Playwright page
  * @param {Array<{bbox:{x,y,width,height}}>} nodes - Items to annotate
  * @param {string} outputPath - Absolute path to save the screenshot
+ * @param {object} [screenshotOpts]  Optional screenshot options passed directly to
+ *   page.screenshot().  Supported keys: `fullPage`, `clip`.
+ *   When omitted the function auto-selects fullPage vs viewport based on page size.
  */
-export async function annotateScreenshot(page, nodes, outputPath) {
-  // If nothing to annotate, just take a regular screenshot
+export async function annotateScreenshot(page, nodes, outputPath, screenshotOpts = {}) {
+  const hasExplicitOpts = Object.keys(screenshotOpts).length > 0;
+
+  // If nothing to annotate, just take a screenshot using caller-supplied opts
   if (!nodes || nodes.length === 0) {
-    await page.screenshot({ path: outputPath, fullPage: true });
+    const fallbackOpts = hasExplicitOpts ? screenshotOpts : { fullPage: true };
+    await page.screenshot({ path: outputPath, ...fallbackOpts });
     return;
   }
 
@@ -30,7 +36,6 @@ export async function annotateScreenshot(page, nodes, outputPath) {
     h:   n.bbox.height,
   }));
 
-  // Inject overlay divs into the page
   await page.evaluate((items) => {
     const OVERLAY_ID = '__dom_analyzer_overlay__';
     document.getElementById(OVERLAY_ID)?.remove();
@@ -78,10 +83,46 @@ export async function annotateScreenshot(page, nodes, outputPath) {
     document.documentElement.appendChild(container);
   }, items);
 
-  await page.screenshot({ path: outputPath, fullPage: true });
+  // Determine screenshot options.
+  // When the caller provides explicit opts (e.g. { clip } for changedRegion mode
+  // or { fullPage: false } for viewport mode) use them directly.
+  // When no opts are given, auto-detect based on page dimensions to avoid the
+  // Skia SkBitmap pixel-allocation crash on oversized pages.
+  let resolvedOpts;
+  if (hasExplicitOpts) {
+    resolvedOpts = screenshotOpts;
+  } else {
+    const dimensions = await page.evaluate(() => ({
+      width:  Math.max(document.documentElement.scrollWidth,  document.body.scrollWidth),
+      height: Math.max(document.documentElement.scrollHeight, document.body.scrollHeight),
+    })).catch(() => ({ width: 0, height: 0 }));
+    resolvedOpts = (dimensions.height > 15000 || dimensions.width > 8000)
+      ? { fullPage: false }
+      : { fullPage: true };
+  }
+
+  let screenshotErr;
+  try {
+    await page.screenshot({ path: outputPath, ...resolvedOpts });
+  } catch (err) {
+    screenshotErr = err;
+    // Viewport-only (fullPage:false) failures are unexpected — propagate.
+    // For fullPage screenshots (with or without a clip region), fall back to a
+    // safe viewport shot so the annotation is not lost entirely.  This covers
+    // the Skia SkBitmap crash on oversized pages AND the case where a clipped
+    // region turns out to be outside the rendered document bounds.
+    if (!resolvedOpts.fullPage) {
+      throw err; // viewport-only failure is unexpected — propagate
+    }
+    await page.screenshot({ path: outputPath, fullPage: false });
+  }
 
   // Remove the overlay so subsequent page interactions are unaffected
   await page.evaluate(() => {
     document.getElementById('__dom_analyzer_overlay__')?.remove();
   });
+
+  if (screenshotErr && resolvedOpts.fullPage) {
+    // Already recovered above; swallow to prevent double-throw
+  }
 }

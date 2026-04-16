@@ -1,0 +1,8 @@
+{
+  "maxInitialWaitMs": 8000,
+  "layoutStabilityWindowMs": 800,
+  "networkIdleWaitMs": 2000,
+  "minElementCount": 20,
+  "maxLoadingRatio": 0.04,
+  "_comment": "Render readiness config — adjust to tune how aggressively the system waits for page content before analysis. Loaded by renderReadinessChecker.js."
+}

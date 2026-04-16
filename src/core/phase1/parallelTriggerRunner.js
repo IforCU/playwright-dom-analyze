@@ -51,6 +51,9 @@ import { runTrigger } from './triggerRunner.js';
  *   autoDynamicRegions?:              object[], // detected auto-dynamic regions (default [])
  *   autoDynamicOverlapThreshold?:     number,   // overlap fraction for noise filtering (default 0.3)
  *   freezeCss?:                       boolean,  // pause CSS animations during trigger (default false)
+ *   authDetectionEnabled?:            boolean,  // run auth classification on nav-away (default true)
+ *   authScoreThreshold?:              number,   // min score for 'auth-likely' (default 5)
+ *   authMaybeThreshold?:              number,   // min score for 'maybe-auth' (default 3)
  * }} config
  * @returns {Promise<{ results: object[], metrics: object }>}
  */
@@ -62,6 +65,9 @@ export async function runTriggersParallel(browser, url, candidates, outDir, conf
     autoDynamicRegions              = [],
     autoDynamicOverlapThreshold     = 0.3,
     freezeCss                       = false,
+    authDetectionEnabled            = true,
+    authScoreThreshold              = 5,
+    authMaybeThreshold              = 3,
   } = config;
 
   if (candidates.length === 0) {
@@ -74,6 +80,9 @@ export async function runTriggersParallel(browser, url, candidates, outDir, conf
     autoDynamicRegions,
     autoDynamicOverlapThreshold,
     freezeCss,
+    authDetectionEnabled,
+    authScoreThreshold,
+    authMaybeThreshold,
   };
 
   // Pre-allocate slots — preserves input order regardless of completion order

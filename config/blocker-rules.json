@@ -1,0 +1,27 @@
+{
+  "overlayCoverageThreshold": 0.30,
+  "minZIndex": 50,
+  "maxBlockers": 6,
+  "dismissWaitMs": 450,
+  "adSkipButtonDelayMs": 2000,
+  "blockerKeywords": [
+    "modal", "popup", "dialog", "overlay", "interstitial", "cookie",
+    "consent", "banner", "gdpr", "install", "promo", "subscribe",
+    "notice", "dimmer", "backdrop", "mask", "layer", "lightbox",
+    "curtain", "splash", "gate", "wall", "adslot", "adsense",
+    "adroll", "toast", "takeover", "sheet"
+  ],
+  "safeDismissKeywords": [
+    "닫기", "close", "dismiss", "skip", "나중에", "다음에",
+    "not now", "no thanks", "later", "accept all", "allow all",
+    "accept cookies", "확인", "got it", "done", "ok", "okay",
+    "continue without", "reject all", "decline all"
+  ],
+  "riskyActionKeywords": [
+    "buy", "checkout", "cart", "log in", "login", "sign up", "install",
+    "download", "subscribe now", "register", "purchase", "join now",
+    "submit", "order now", "add to cart", "apply now", "start free",
+    "get started", "upgrade"
+  ],
+  "_comment": "Blocker/modal detection rules — tune thresholds and keywords to improve overlay detection accuracy. Loaded by pageStabilizer.js in future config-driven mode."
+}

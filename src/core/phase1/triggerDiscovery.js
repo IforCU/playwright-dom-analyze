@@ -23,6 +23,7 @@
  */
 
 import { isInAutoDynamicRegion, overlapRatio } from './autoDynamicDetector.js';
+import { AUTH_SENSITIVE_TEXT_HINTS }           from './authNavigationClassifier.js';
 
 /**
  * Find interactive trigger candidates on the page, excluding elements that
@@ -102,6 +103,16 @@ export async function findTriggerCandidates(page, autoDynamicRegions = [], overl
         seen.add(el);
 
         const tag  = el.tagName.toLowerCase();
+
+        // ── FILTER 1: Skip text-entry input fields ─────────────────────────────
+        // Clicking text/search/email inputs just focuses the cursor — it does
+        // not reveal new DOM structure.  Only action inputs (button, submit) and
+        // toggle inputs (checkbox, radio) are meaningful trigger candidates.
+        if (tag === 'input') {
+          const itype = (el.getAttribute('type') || 'text').toLowerCase();
+          if (!['button', 'submit', 'reset', 'image', 'checkbox', 'radio'].includes(itype)) continue;
+        }
+
         const text = (el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 80);
         const role = el.getAttribute('role') || null;
 
@@ -134,6 +145,31 @@ export async function findTriggerCandidates(page, autoDynamicRegions = [], overl
             continue; // skip pure navigation link
           }
         }
+
+        // ── FILTER 2: Skip advertisement containers ──────────────────────────
+        // Ad slots produce noise mutations and yield no structural discovery value.
+        // Matches id/class patterns like ad_timeboard, advert_slot, adsense, etc.
+        const _hintId  = el.id || '';
+        const _hintCls = typeof el.className === 'string' ? el.className : '';
+        // \bads?[_-] catches ad_foo and ads_foo; individual terms catch well-known
+        // ad vendor class names.  The pattern intentionally avoids 'ad' alone to
+        // prevent false-positives on words like 'adapt', 'add', 'addon', etc.
+        const AD_NODE_RE = /\bads?[_-]|advert|adsense|adroll|adslot|sponsored|banner[_-]ad/i;
+        if (AD_NODE_RE.test(_hintId) || AD_NODE_RE.test(_hintCls)) continue;
+
+        // ── FILTER 3: Skip scroll-navigation and content-rotation utilities ──
+        // These buttons scroll the page, refresh widget content in-place, or
+        // rotate recommendation lists — none reveal new hidden DOM sections.
+        // Match is anchored (^ $) to avoid false-positives on longer labels.
+        const UTILITY_TEXT_RE = /^(새로고침|refresh|reload|최상단(으로\s*이동)?|go\s+to\s+top|back\s+to\s+top|scroll\s+to\s+top|입력도구|input\s+tool|다음\s+페이지|이전\s+페이지|다른\s+추천\s+보기|see\s+(other|more)\s+recommend(ation)?)$/i;
+        if (text && UTILITY_TEXT_RE.test(text)) continue;
+
+        // ── FILTER 4: Skip micro-icon elements ───────────────────────────────
+        // Elements smaller than 22×22 px in BOTH dimensions are typically
+        // icon-only decorators or status indicators (info icons, tiny badges)
+        // rather than content-expansion triggers.
+        const _fr = el.getBoundingClientRect();
+        if (_fr.width < 22 && _fr.height < 22) continue;
 
         // Prefer hover for tooltip-style elements (non-button, non-link, has title)
         let triggerType = 'click';
@@ -168,7 +204,7 @@ export async function findTriggerCandidates(page, autoDynamicRegions = [], overl
     return candidates;
   });
 
-  if (!autoDynamicRegions.length) return _dedupBySelectorHint(rawCandidates);
+  if (!autoDynamicRegions.length) return _tagAuthSensitive(_dedupBySelectorHint(rawCandidates));
 
   // ── Filter out candidates inside auto-dynamic regions ─────────────────────
   // Carousel nav dots, prev/next arrows, and ad-slot controls commonly appear
@@ -188,7 +224,7 @@ export async function findTriggerCandidates(page, autoDynamicRegions = [], overl
       interactiveCandidates.push(c);
     }
   }
-  return _dedupBySelectorHint(interactiveCandidates);
+  return _tagAuthSensitive(_dedupBySelectorHint(interactiveCandidates));
 }
 
 /**
@@ -215,4 +251,22 @@ function _dedupBySelectorHint(candidates) {
     result.push(c);
   }
   return result;
+}
+
+/**
+ * Tag candidates whose visible text matches common auth-sensitive patterns.
+ *
+ * Auth-sensitive candidates (login, cart, my page, checkout, etc.) are NOT
+ * excluded — they are still explored because they reveal auth-gated flows.
+ * The tag is used by downstream reporting and Phase 3 classification.
+ *
+ * @param {object[]} candidates
+ * @returns {object[]} Same array, mutated in-place with `.authSensitiveHint` set
+ */
+function _tagAuthSensitive(candidates) {
+  for (const c of candidates) {
+    const txt = (c.text || '').toLowerCase();
+    c.authSensitiveHint = AUTH_SENSITIVE_TEXT_HINTS.some((kw) => txt.includes(kw.toLowerCase()));
+  }
+  return candidates;
 }

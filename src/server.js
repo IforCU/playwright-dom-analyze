@@ -9,6 +9,7 @@ import express from 'express';
 import { fileURLToPath } from 'url';
 import path from 'path';
 import analyzeRouter from './routes/analyze.js';
+import auditRouter  from './routes/audit.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -21,13 +22,15 @@ app.use(express.json());
 // Serve the request UI from public/
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
-// Mount the analyze route
+// Mount routes
 app.use('/', analyzeRouter);
+app.use('/', auditRouter);
 
 const server = app.listen(PORT, () => {
   console.log(`[server] listening on http://localhost:${PORT}`);
   console.log(`[server] UI      → http://localhost:${PORT}/`);
   console.log(`[server] API     → POST http://localhost:${PORT}/analyze`);
+  console.log(`[server] Audit   → POST http://localhost:${PORT}/audit`);
 });
 
 server.on('error', (err) => {

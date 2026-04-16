@@ -1,0 +1,19 @@
+{
+  "focusScoreThreshold": 2,
+  "minVisibleArea": 200,
+  "minTextLength": 3,
+  "minQualityScore": 3,
+  "duplicateBboxTolerance": 2,
+  "keepClassKeywords": [
+    "hero", "feature", "highlight", "product", "card", "item", "result",
+    "article", "post", "news", "story", "listing", "search", "form",
+    "filter", "tab", "accordion", "modal", "dialog", "price", "rating",
+    "review", "breadcrumb", "pagination", "cta", "action"
+  ],
+  "dropClassKeywords": [
+    "ad", "ads", "advert", "adsense", "adroll", "banner-ad",
+    "sponsored", "promo-box", "tracking", "pixel", "beacon",
+    "skeleton", "shimmer", "placeholder", "loading", "spinner"
+  ],
+  "_comment": "DOM filtering rules — adjust keepClassKeywords and dropClassKeywords to tune what the analyzer focuses on. Loaded by staticAnalysis.js in future config-driven mode."
+}

@@ -72,7 +72,7 @@ export function computePageIdentity(rawUrl) {
  * @param {{ hostname, normalizedPath, dedupKey, representativeUrl, jobId }} opts
  * @returns {object}
  */
-export function createNode({ hostname, normalizedPath, dedupKey, representativeUrl, jobId }) {
+export function createNode({ hostname, normalizedPath, dedupKey, representativeUrl, jobId, authGated = false }) {
   const now = new Date().toISOString();
   return {
     nodeId:                 randomUUID(),
@@ -88,6 +88,10 @@ export function createNode({ hostname, normalizedPath, dedupKey, representativeU
     analyzedAt:             null,
     analysisStatus:         null,                 // 'success' | 'failed'
     lastReachabilityStatus: null,
+    // true when this node represents an authentication page (login / consent)
+    // rather than a normal content page.  authGated nodes are NOT enqueued for
+    // content exploration — they are preserved only as graph discoveries.
+    authGated,
     notes:                  null,
   };
 }
@@ -98,10 +102,25 @@ export function createNode({ hostname, normalizedPath, dedupKey, representativeU
  * Create a new directed edge from one page node to another.
  * Edges represent discovered navigation links.
  *
- * @param {{ fromNodeId, toNodeId, jobId, discoverySource, triggerId?, representativeUrl }} opts
+ * @param {{ fromNodeId, toNodeId, jobId, discoverySource, triggerId?,
+ *           representativeUrl, edgeType?, requiresAuth?, authDetected?,
+ *           authScore?, navigationStatus? }} opts
  * @returns {object}
  */
-export function createEdge({ fromNodeId, toNodeId, jobId, discoverySource, triggerId = null, representativeUrl }) {
+export function createEdge({
+  fromNodeId, toNodeId, jobId, discoverySource,
+  triggerId        = null,
+  representativeUrl,
+  // Edge type classifies how this link was discovered / what it represents:
+  //   normal_discovery   — found via static DOM link or Phase 3 URL extraction
+  //   navigation_trigger — discovered when a trigger led to a content page
+  //   auth_gate          — trigger led to a login / auth-provider page
+  edgeType         = 'normal_discovery',
+  requiresAuth     = false,
+  authDetected     = false,
+  authScore        = null,
+  navigationStatus = null,
+}) {
   return {
     edgeId:            randomUUID(),
     fromNodeId,
@@ -111,5 +130,10 @@ export function createEdge({ fromNodeId, toNodeId, jobId, discoverySource, trigg
     discoverySource,
     triggerId,
     representativeUrl,
+    edgeType,
+    requiresAuth,
+    authDetected,
+    authScore,
+    navigationStatus,
   };
 }
