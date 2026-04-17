@@ -284,13 +284,78 @@
     .hi-status-skipped  { color: #60a5fa; }
     .hi-status-stopped  { color: #fb923c; }
     .hi-status-error    { color: #f87171; }
+
+    /* ── Tabs ───────────────────────────────────────────────────────────────────── */
+    .tabs {
+      display: flex; gap: 6px;
+      width: 100%; max-width: 640px;
+      margin-bottom: 16px;
+    }
+    .tab-btn {
+      flex: 1; padding: 9px 0; border-radius: 8px;
+      font-size: 0.85rem; font-weight: 600;
+      border: 1px solid #2d3348; background: #1e2230; color: #64748b;
+      cursor: pointer; transition: all 0.15s;
+    }
+    .tab-btn:hover { color: #94a3b8; border-color: #475569; }
+    .tab-btn.active { background: #6366f1; color: #fff; border-color: #6366f1; }
+    .tab-panel { width: 100%; max-width: 640px; }
+
+    /* ── Crawl form extras ─────────────────────────────────────────────────────── */
+    input[type=text], input[type=password], input[type=number] {
+      width: 100%; padding: 10px 14px;
+      background: #0f1117; border: 1px solid #2d3348;
+      border-radius: 8px; color: #e2e8f0;
+      font-size: 0.9rem; outline: none; transition: border-color 0.15s;
+    }
+    input[type=text]:focus, input[type=password]:focus, input[type=number]:focus { border-color: #6366f1; }
+    input[type=text]::placeholder, input[type=password]::placeholder,
+    input[type=number]::placeholder { color: #334155; }
+    details { margin-top: 14px; }
+    details summary {
+      cursor: pointer; font-size: 0.78rem; font-weight: 500; color: #64748b;
+      text-transform: uppercase; letter-spacing: 0.06em;
+      padding: 6px 0; user-select: none; list-style: none;
+    }
+    details summary::before { content: '▸ '; }
+    details[open] summary::before { content: '▾ '; }
+    details .detail-body { padding: 10px 0 0; display: flex; flex-direction: column; gap: 10px; }
+    .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .field { display: flex; flex-direction: column; gap: 4px; }
+    .field label { margin-bottom: 0; }
+
+    /* ── Crawl summary cards ───────────────────────────────────────────────────── */
+    .crawl-summary {
+      display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 16px;
+    }
+    .cs-card {
+      background: #0f1117; border: 1px solid #2d3348;
+      border-radius: 8px; padding: 12px 14px; text-align: center;
+    }
+    .cs-label { font-size: 0.68rem; color: #475569; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 6px; }
+    .cs-value { font-size: 1.3rem; font-weight: 700; color: #e2e8f0; line-height: 1; }
+    .cs-sub   { font-size: 0.68rem; color: #475569; margin-top: 4px; }
+    .crawl-viz-link {
+      display: flex; align-items: center; gap: 8px;
+      padding: 10px 14px; background: #1a2640;
+      border: 1px solid #1e3a5f; border-radius: 8px;
+      font-size: 0.82rem; color: #60a5fa; text-decoration: none;
+      margin-top: 12px; transition: background 0.15s;
+    }
+    .crawl-viz-link:hover { background: #1e3a5f; }
   </style>
 </head>
 <body>
 
-<h1>Analyze Worker</h1>
-<p class="subtitle">POST /analyze · 로컬 Playwright DOM 분석기</p>
+<h1>Playwright Crawler</h1>
+<p class="subtitle">로컬 Playwright DOM 탐색 엔진</p>
 
+<div class="tabs">
+  <button class="tab-btn active" id="tab-analyze-btn" onclick="switchTab('analyze')">&#128196; 단일 페이지 분석</button>
+  <button class="tab-btn" id="tab-crawl-btn" onclick="switchTab('crawl')">&#128578; BFS 크롤 탐색</button>
+</div>
+
+<div id="panel-analyze" class="tab-panel">
 <div class="card">
   <label for="inp-original">originalUrl <span style="color:#334155;font-weight:400;text-transform:none">(탐색 범위 루트)</span></label>
   <input id="inp-original" type="url" placeholder="https://example.com" />
@@ -357,6 +422,122 @@
     </div>
   </div>
 </div>
+
+</div><!-- end #panel-analyze -->
+
+<!-- BFS Crawl panel -->
+<div id="panel-crawl" class="tab-panel" style="display:none">
+<div class="card">
+  <label for="c-original">originalUrl <span style="color:#334155;font-weight:400;text-transform:none">(탐색 범위 루트)</span></label>
+  <input id="c-original" type="url" placeholder="https://example.com" />
+  <p class="hint">BFS는 이 URL의 호스트명만 탐색합니다. 서브도메인은 별도 스코프로 간주됩니다.</p>
+
+  <label for="c-request">requestUrl <span style="color:#334155;font-weight:400;text-transform:none">(BFS 시작점 · 생략 시 originalUrl)</span></label>
+  <input id="c-request" type="url" placeholder="https://example.com/blog  (선택)" />
+  <p class="hint" style="margin-bottom:0">생략하면 originalUrl에서 BFS를 시작합니다.</p>
+
+  <details>
+    <summary>자격증명 (선택)</summary>
+    <div class="detail-body">
+      <div class="field">
+        <label for="c-user">사용자명</label>
+        <input id="c-user" type="text" placeholder="username or email" autocomplete="username" />
+      </div>
+      <div class="field">
+        <label for="c-pass">비밀번호</label>
+        <input id="c-pass" type="password" placeholder="password" autocomplete="current-password" />
+      </div>
+    </div>
+  </details>
+
+  <details>
+    <summary>탐색 옵션 (선택)</summary>
+    <div class="detail-body">
+      <div class="field-row">
+        <div class="field">
+          <label for="c-maxpages">maxPages <span style="color:#334155;font-weight:400">(1–200, 기본 20)</span></label>
+          <input id="c-maxpages" type="number" placeholder="20" min="1" max="200" />
+        </div>
+        <div class="field">
+          <label for="c-maxdepth">maxDepth <span style="color:#334155;font-weight:400">(0–20, 기본 5)</span></label>
+          <input id="c-maxdepth" type="number" placeholder="5" min="0" max="20" />
+        </div>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label for="c-maxppages">maxParallelPages <span style="color:#334155;font-weight:400">(1–8, 기본 1)</span></label>
+          <input id="c-maxppages" type="number" placeholder="1" min="1" max="8" />
+        </div>
+        <div class="field">
+          <label for="c-maxptriggers">maxParallelTriggers <span style="color:#334155;font-weight:400">(1–8, 기본 4)</span></label>
+          <input id="c-maxptriggers" type="number" placeholder="4" min="1" max="8" />
+        </div>
+      </div>
+    </div>
+  </details>
+
+  <div class="row">
+    <button id="c-btn-run">▶ 크롤 실행</button>
+    <button id="c-btn-clear">초기화</button>
+    <span id="c-elapsed" style="font-size:0.75rem;color:#475569;margin-left:auto;display:none"></span>
+  </div>
+
+  <div class="status-bar">
+    <span class="dot dot-idle" id="c-dot"></span>
+    <span id="c-status-text">대기 중</span>
+  </div>
+</div>
+
+<div id="crawl-result-area" style="display:none;margin-top:0">
+  <div class="divider" style="margin-top:16px"></div>
+  <div class="crawl-summary">
+    <div class="cs-card">
+      <div class="cs-label">분석 완료</div>
+      <div class="cs-value" id="cs-analyzed">—</div>
+      <div class="cs-sub">페이지</div>
+    </div>
+    <div class="cs-card">
+      <div class="cs-label">최대 깊이</div>
+      <div class="cs-value" id="cs-depth">—</div>
+      <div class="cs-sub">BFS 레벨</div>
+    </div>
+    <div class="cs-card">
+      <div class="cs-label">발견 URL</div>
+      <div class="cs-value" id="cs-queue">—</div>
+      <div class="cs-sub">총 큐 투입</div>
+    </div>
+    <div class="cs-card">
+      <div class="cs-label">실패</div>
+      <div class="cs-value" id="cs-failed">—</div>
+      <div class="cs-sub">페이지</div>
+    </div>
+    <div class="cs-card">
+      <div class="cs-label">중단 이유</div>
+      <div class="cs-value" id="cs-stop" style="font-size:0.75rem;line-height:1.3">—</div>
+      <div class="cs-sub"></div>
+    </div>
+    <div class="cs-card">
+      <div class="cs-label">소요 시간</div>
+      <div class="cs-value" id="cs-duration">—</div>
+      <div class="cs-sub">초</div>
+    </div>
+  </div>
+
+  <div id="c-viz-row" style="display:none">
+    <a id="c-viz-link" href="#" target="_blank" class="crawl-viz-link">
+      &#128376; crawl-graph.html &mdash; 인터랙티브 탐색 그래프 열기
+    </a>
+  </div>
+
+  <div class="result-block" style="margin-top:12px">
+    <div class="result-header">
+      <span>응답 JSON</span>
+      <span class="badge badge-done" id="c-result-badge">done</span>
+    </div>
+    <pre id="c-result-json"></pre>
+  </div>
+</div>
+</div><!-- end #panel-crawl -->
 
 <!-- History -->
 <div id="history">
@@ -525,6 +706,128 @@
 
   function esc(s) {
     return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  // ── Tab switching ──────────────────────────────────────────────────────────────────
+  function switchTab(tab) {
+    document.getElementById('panel-analyze').style.display = tab === 'analyze' ? '' : 'none';
+    document.getElementById('panel-crawl').style.display   = tab === 'crawl'   ? '' : 'none';
+    document.getElementById('tab-analyze-btn').classList.toggle('active', tab === 'analyze');
+    document.getElementById('tab-crawl-btn').classList.toggle('active',   tab === 'crawl');
+  }
+  window.switchTab = switchTab;
+
+  // ── Crawl form ──────────────────────────────────────────────────────────────────
+  const cBtnRun     = document.getElementById('c-btn-run');
+  const cBtnClear   = document.getElementById('c-btn-clear');
+  const cOrigInput  = document.getElementById('c-original');
+  const cReqInput   = document.getElementById('c-request');
+  const cElapsed    = document.getElementById('c-elapsed');
+  const cResultArea = document.getElementById('crawl-result-area');
+
+  cBtnRun.addEventListener('click', runCrawl);
+  cBtnClear.addEventListener('click', clearCrawl);
+  cOrigInput.addEventListener('keydown', (e) => e.key === 'Enter' && runCrawl());
+
+  async function runCrawl() {
+    const originalUrl = cOrigInput.value.trim();
+    if (!originalUrl) { cOrigInput.focus(); return; }
+
+    const requestUrl      = cReqInput.value.trim() || undefined;
+    const username        = document.getElementById('c-user').value.trim();
+    const password        = document.getElementById('c-pass').value;
+    const maxPagesRaw     = document.getElementById('c-maxpages').value.trim();
+    const maxDepthRaw     = document.getElementById('c-maxdepth').value.trim();
+    const maxPPagesRaw    = document.getElementById('c-maxppages').value.trim();
+    const maxPTriggersRaw = document.getElementById('c-maxptriggers').value.trim();
+
+    const body = { originalUrl };
+    if (requestUrl) body.requestUrl = requestUrl;
+    if (username && password) body.credentials = { username, password };
+
+    const opts = {};
+    if (maxPagesRaw)     opts.maxPages            = parseInt(maxPagesRaw, 10);
+    if (maxDepthRaw)     opts.maxDepth            = parseInt(maxDepthRaw, 10);
+    if (maxPPagesRaw)    opts.maxParallelPages     = parseInt(maxPPagesRaw, 10);
+    if (maxPTriggersRaw) opts.maxParallelTriggers  = parseInt(maxPTriggersRaw, 10);
+    if (Object.keys(opts).length > 0) body.crawlOptions = opts;
+
+    setCrawlState('running', '크롤 실행 중 … (시간이 걸릴 수 있습니다)');
+    cResultArea.style.display = 'none';
+    cBtnRun.disabled = true;
+    cElapsed.style.display = 'none';
+
+    const t0 = Date.now();
+    let data, ok;
+    try {
+      const res = await fetch('/crawl', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      data = await res.json();
+      ok   = res.ok;
+    } catch (err) {
+      data = { error: err.message };
+      ok   = false;
+    }
+
+    const ms = Date.now() - t0;
+    cElapsed.textContent = `${(ms / 1000).toFixed(1)}s`;
+    cElapsed.style.display = 'inline';
+
+    setCrawlState(ok ? 'done' : 'error',
+      ok ? '크롤 완료' : `오류: ${data.error ?? '알 수 없음'}`);
+    renderCrawlResult(data, ok);
+    cBtnRun.disabled = false;
+  }
+
+  function setCrawlState(s, text) {
+    document.getElementById('c-dot').className           = 'dot dot-' + s;
+    document.getElementById('c-status-text').textContent = text;
+  }
+
+  function renderCrawlResult(data, ok) {
+    cResultArea.style.display = 'block';
+    const cs = data.crawlSummary ?? {};
+    document.getElementById('cs-analyzed').textContent = cs.totalPagesAnalyzed ?? '—';
+    document.getElementById('cs-depth').textContent    = cs.maxDepthReached    ?? '—';
+    document.getElementById('cs-queue').textContent    = cs.totalQueueEnqueued ?? '—';
+    document.getElementById('cs-failed').textContent   = cs.totalPagesFailed   ?? '—';
+    document.getElementById('cs-stop').textContent     = (data.stopReason ?? '—').replace(/_/g, ' ');
+    document.getElementById('cs-duration').textContent =
+      data.durationMs != null ? (data.durationMs / 1000).toFixed(1) : '—';
+
+    const vizPath = data.graphVisualization?.graphHtmlPath;
+    const vizRow  = document.getElementById('c-viz-row');
+    const vizLink = document.getElementById('c-viz-link');
+    if (vizPath) {
+      vizLink.href = '/' + vizPath.replace(/\\/g, '/');
+      vizRow.style.display = 'block';
+    } else {
+      vizRow.style.display = 'none';
+    }
+
+    const badge = document.getElementById('c-result-badge');
+    badge.className = `badge ${ok ? 'badge-done' : 'badge-error'}`;
+    badge.textContent = ok ? 'done' : 'error';
+
+    document.getElementById('c-result-json').textContent = JSON.stringify(data, null, 2);
+  }
+
+  function clearCrawl() {
+    cOrigInput.value = '';
+    cReqInput.value  = '';
+    document.getElementById('c-user').value         = '';
+    document.getElementById('c-pass').value         = '';
+    document.getElementById('c-maxpages').value     = '';
+    document.getElementById('c-maxdepth').value     = '';
+    document.getElementById('c-maxppages').value    = '';
+    document.getElementById('c-maxptriggers').value = '';
+    cResultArea.style.display = 'none';
+    setCrawlState('idle', '대기 중');
+    cElapsed.style.display = 'none';
+    cOrigInput.focus();
   }
 </script>
 </body>

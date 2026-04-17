@@ -24,7 +24,7 @@ import { createFreshContext, navigateTo } from './browser.js';
 import { MUTATION_TRACKER_SCRIPT, installMutationTracker, getMutations, resetMutations } from './mutationTracker.js';
 import { extractStaticNodes } from './staticAnalysis.js';
 import { annotateScreenshot } from './annotate.js';
-import { compareNodeSets, extractNewRegions } from './compare.js';
+import { computeTriggerDelta, extractNewRegions } from './compare.js';
 import { sleep } from './utils.js';
 
 // ── Config ─────────────────────────────────────────────────────────────────
@@ -102,18 +102,43 @@ export async function runTrigger(browser, url, candidate, outDir) {
     await installMutationTracker(page).catch(() => {});
     const mutations = await getMutations(page).catch(() => []);
 
-    // ── 6. Compare states ─────────────────────────────────────────────────────
-    const { newNodes }  = compareNodeSets(beforeNodes, afterNodes);
-    const newRegions    = extractNewRegions(newNodes);
+    // ── 6. Delta analysis (delta-only labeling) ───────────────────────────────
+    const rawDelta      = computeTriggerDelta(beforeNodes, afterNodes, mutations);
+    const deltaLabelNodes   = rawDelta.deltaLabelNodes;
+    const newNodes          = rawDelta.newNodes;
+    const newlyVisibleNodes = rawDelta.newlyVisibleNodes;
+    const changedNodes      = rawDelta.changedNodes;
+    const newRegions        = extractNewRegions(deltaLabelNodes);
 
-    // ── 7. Annotated screenshot of changed area ───────────────────────────────
+    // ── 7. Annotated screenshot of changed area ──────────────────────────────
+    // Annotate only deltaLabelNodes — NOT the full afterNodes list.
+    // Trigger-result annotations must show only what the trigger changed.
     const annotatedPath = path.join(resultsDir, `${triggerId}-annotated.png`);
-    if (newNodes.length > 0) {
-      await annotateScreenshot(page, newNodes.slice(0, 60), annotatedPath);
+    if (deltaLabelNodes.length > 0) {
+      await annotateScreenshot(page, deltaLabelNodes.slice(0, 60), annotatedPath);
     } else {
       // Nothing changed — copy the after screenshot as the annotated one
       await fs.copyFile(afterPath, annotatedPath);
     }
+
+    // ── 6b. Diff-debug output ─────────────────────────────────────────────────
+    const debugPath = path.join(resultsDir, `${triggerId}-diff-debug.json`);
+    await fs.writeFile(debugPath, JSON.stringify({
+      triggerId,
+      _note: 'Delta computed by computeTriggerDelta multi-tier matching. Unchanged baseline nodes excluded from annotation.',
+      baselineVisibleNodeCount:  beforeNodes.length,
+      afterVisibleNodeCount:     afterNodes.length,
+      newNodeCount:              newNodes.length,
+      newlyVisibleNodeCount:     newlyVisibleNodes.length,
+      changedNodeCount:          changedNodes.length,
+      unchangedNodesCount:       rawDelta.unchangedNodesCount,
+      deltaLabelNodesCount:      deltaLabelNodes.length,
+      newNodeIds:                newNodes.map((n) => n.nodeId),
+      newlyVisibleNodeIds:       newlyVisibleNodes.map((n) => n.nodeId),
+      changedNodeIds:            changedNodes.map((n) => n.nodeId),
+      finalLabeledDeltaNodeIds:  deltaLabelNodes.map((n) => n.nodeId),
+      ignoredUnchangedNodeCount: rawDelta.unchangedNodesCount,
+    }, null, 2));
 
     await context.close();
 
@@ -121,16 +146,22 @@ export async function runTrigger(browser, url, candidate, outDir) {
     const relBase = path.join('outputs', path.basename(outDir), 'trigger-results');
     return {
       triggerId,
-      action:              triggerType,
-      status:              actionError ? 'failed' : 'success',
-      beforeScreenshot:    toUnix(path.join(relBase, `${triggerId}-before.png`)),
-      afterScreenshot:     toUnix(path.join(relBase, `${triggerId}-after.png`)),
-      annotatedScreenshot: toUnix(path.join(relBase, `${triggerId}-annotated.png`)),
-      mutationCount:       mutations.length,
-      mutations:           mutations.slice(0, 100), // cap payload size
-      newNodes:            newNodes.slice(0, 50),
+      action:               triggerType,
+      status:               actionError ? 'failed' : 'success',
+      beforeScreenshot:     toUnix(path.join(relBase, `${triggerId}-before.png`)),
+      afterScreenshot:      toUnix(path.join(relBase, `${triggerId}-after.png`)),
+      annotatedScreenshot:  toUnix(path.join(relBase, `${triggerId}-annotated.png`)),
+      diffDebug:            toUnix(path.join(relBase, `${triggerId}-diff-debug.json`)),
+      mutationCount:        mutations.length,
+      mutations:            mutations.slice(0, 100),
+      newNodes:             newNodes.slice(0, 50),
+      newlyVisibleNodes:    newlyVisibleNodes.slice(0, 50),
+      changedNodes:         changedNodes.slice(0, 50),
+      deltaLabelNodes:      deltaLabelNodes.slice(0, 50),
+      unchangedNodesCount:  rawDelta.unchangedNodesCount,
+      deltaLabelNodesCount: deltaLabelNodes.length,
       newRegions,
-      summary:             buildSummary(candidate, newNodes, mutations, actionError),
+      summary:              buildSummary(candidate, deltaLabelNodes, mutations, actionError),
       ...(actionError ? { error: actionError } : {}),
     };
 
@@ -139,17 +170,22 @@ export async function runTrigger(browser, url, candidate, outDir) {
 
     return {
       triggerId,
-      action:              candidate.triggerType,
-      status:              'failed',
-      beforeScreenshot:    null,
-      afterScreenshot:     null,
-      annotatedScreenshot: null,
-      mutationCount:       0,
-      mutations:           [],
-      newNodes:            [],
-      newRegions:          [],
-      summary:             `Exception: ${err.message}`,
-      error:               err.message,
+      action:               candidate.triggerType,
+      status:               'failed',
+      beforeScreenshot:     null,
+      afterScreenshot:      null,
+      annotatedScreenshot:  null,
+      mutationCount:        0,
+      mutations:            [],
+      newNodes:             [],
+      newlyVisibleNodes:    [],
+      changedNodes:         [],
+      deltaLabelNodes:      [],
+      unchangedNodesCount:  0,
+      deltaLabelNodesCount: 0,
+      newRegions:           [],
+      summary:              `Exception: ${err.message}`,
+      error:                err.message,
     };
   }
 }

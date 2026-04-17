@@ -55,6 +55,8 @@ import { detectAutoDynamicRegions }                      from './phase1/autoDyna
 
 // ── Shared core utilities ──────────────────────────────────────────────────────
 import { annotateScreenshot }                            from './annotate.js';
+import { classifyNodes, buildLegend }                    from './functionalClassifier.js';
+import { applyLabelFilter }                              from './labelFilter.js';
 import { jobOutputDir, toRelPath }                       from './utils.js';
 
 // ── Phase 3 modules ────────────────────────────────────────────────────────────
@@ -69,7 +71,8 @@ import { buildQueue }                                    from './phase3/buildQue
 
 // ── Graph modules ──────────────────────────────────────────────────────────────
 import { computePageIdentity }                           from './graph/graphModel.js';
-import { loadGraph, saveGraph, saveSnapshot }            from './graph/graphStore.js';
+import { saveSnapshot }                               from './graph/graphStore.js';
+import { createGraph }                                from './graph/graphStore.js';
 import { findNode, upsertNode, upsertEdge,
          markNodeAnalyzed,
          updateNodeReachability }                        from './graph/graphUpdater.js';
@@ -118,6 +121,28 @@ const CONFIG = {
     qualityThreshold: parseInt(process.env.NODE_MIN_SCORE  || '3',   10),
     debugDrop:        process.env.DEBUG_NODES === 'true',
   },
+  // ── Label filter config ────────────────────────────────────────────────────
+  // Controls the two-layer annotation model: raw extraction vs. labeled output.
+  // See src/core/labelFilter.js for full description of each option.
+  LABEL_FILTER: {
+    // 'dense' | 'balanced' | 'minimal'
+    labelMode:                               process.env.LABEL_MODE              || 'balanced',
+    // Explicit score override (null = derived from labelMode)
+    labelMinScore:                           process.env.LABEL_MIN_SCORE != null && process.env.LABEL_MIN_SCORE !== ''
+                                               ? parseInt(process.env.LABEL_MIN_SCORE, 10) : null,
+    // Suppress lower-value nodes whose bbox is mostly inside a higher-scoring node
+    suppressChildLabelsWhenParentIsSufficient: process.env.SUPPRESS_CHILD_LABELS !== 'false',
+    // Cap repeated card/link/media grids to a small number of representatives
+    preferGroupLabelingForRepeatedItems:       process.env.PREFER_GROUP_LABELS    !== 'false',
+    // Hard cap on total annotation labels per page
+    maxLabelsPerViewport:                     parseInt(process.env.MAX_LABELS_VIEWPORT || '200', 10),
+    // Write per-node filtering decisions to label-filter-debug.json
+    debugFilter:                              process.env.DEBUG_LABEL_FILTER      === 'true',
+  },
+  // ── Async worker counts ────────────────────────────────────────────────────
+  // Per-request overrides are accepted via runAnalysis params.
+  // These CONFIG values are the env-backed fallback defaults.
+  MAX_PARALLEL_PREFLIGHT_CHECKS: parseInt(process.env.MAX_PARALLEL_PREFLIGHT_CHECKS || '8', 10),
 };
 
 // ── Entry point ────────────────────────────────────────────────────────────────
@@ -130,8 +155,30 @@ const CONFIG = {
  *   requestUrl  — the specific page being analyzed in this execution
  * @returns {Promise<{ outputPath: string, currentPageStatus: string, summary: object }>}
  */
-export async function runAnalysis({ jobId, originalUrl, requestUrl }) {
-  const outDir        = jobOutputDir(jobId);
+export async function runAnalysis({
+  jobId,
+  originalUrl,
+  requestUrl,
+  // ── Crawl mode overrides (all optional — safe to omit for single-page use) ──
+  // sharedBrowser:    reuse an existing Browser instance; skip launchBrowser/close
+  // sharedGraph:      reuse an existing in-memory graph object; a new empty
+  //                   graph is created per request when this is not provided
+  // pageOutDir:       override output directory (default: jobOutputDir(jobId))
+  // storageStatePath: Playwright storageState file for authenticated sessions
+  sharedBrowser    = null,
+  sharedGraph      = null,
+  pageOutDir       = null,
+  storageStatePath = null,
+  // ── Async worker count overrides (null → fall back to CONFIG / env defaults) ─
+  // maxParallelTriggers:       concurrent trigger workers for this page
+  // maxParallelPreflightChecks: concurrent preflight HTTP checks for this page
+  maxParallelTriggers       = null,
+  maxParallelPreflightChecks = null,
+}) {
+  // Resolve effective worker counts: request-level override > env default
+  const effectiveMaxTriggerWorkers  = maxParallelTriggers       ?? CONFIG.MAX_PARALLEL_TRIGGER_WORKERS;
+  const effectiveMaxPreflightChecks = maxParallelPreflightChecks ?? CONFIG.MAX_PARALLEL_PREFLIGHT_CHECKS;
+  const outDir        = pageOutDir ?? jobOutputDir(jobId);
   const trigResultDir = path.join(outDir, 'trigger-results');
   const startedAt     = new Date().toISOString();
 
@@ -187,9 +234,12 @@ export async function runAnalysis({ jobId, originalUrl, requestUrl }) {
     };
   }
 
-  // ── 2. Load persistent graph ─────────────────────────────────────────────────
-  const graph = await loadGraph();
-  console.log(`[graph]  loaded  nodes=${Object.keys(graph.nodes).length}  edges=${Object.keys(graph.edges).length}`);
+  // ── 2. Initialize per-request graph ──────────────────────────────────────────
+  // Graph is always scoped to the current request; there is no cross-request
+  // persistence.  In crawl mode the caller passes a sharedGraph that lives for
+  // the duration of the entire crawl run.
+  const graph = sharedGraph ?? createGraph();
+  console.log(`[graph]  ${sharedGraph ? 'shared' : 'new'}  nodes=${Object.keys(graph.nodes).length}  edges=${Object.keys(graph.edges).length}`);
 
   // ── 3. Compute input page identity ───────────────────────────────────────────
   const inputIdentity = computePageIdentity(requestUrl);
@@ -250,9 +300,15 @@ export async function runAnalysis({ jobId, originalUrl, requestUrl }) {
   }
 
   // ── 3. Launch browser (only for new pages) ────────────────────────────────────
-  let browser = null;
+  // In crawl mode (sharedBrowser provided) we reuse the caller's browser
+  // instance and must NOT close it when we are done.
+  let browser      = sharedBrowser ?? null;
+  let _ownsBrowser = !sharedBrowser;
+  if (!browser) {
+    browser      = await launchBrowser();
+    _ownsBrowser = true;
+  }
   try {
-    browser = await launchBrowser();
 
     // ════════════════════════════════════════════════════════════════════════════
     // PHASE 1  —  Static analysis + dynamic trigger exploration
@@ -260,7 +316,7 @@ export async function runAnalysis({ jobId, originalUrl, requestUrl }) {
 
     console.log('[phase1] ── starting ─────────────────────────');
 
-    const baseCtx  = await createFreshContext(browser);
+    const baseCtx  = await createFreshContext(browser, { storageState: storageStatePath });
     await baseCtx.addInitScript(MUTATION_TRACKER_SCRIPT);
     const basePage = await baseCtx.newPage();
     await navigateTo(basePage, requestUrl);
@@ -343,8 +399,9 @@ export async function runAnalysis({ jobId, originalUrl, requestUrl }) {
       extractStaticNodes(basePage, CONFIG.NODE_FILTER),
       getPageLinks(basePage),
     ]);
-    const allNodes     = nodeResult.nodes;
-    const droppedNodes = nodeResult.droppedNodes;
+    const allNodes             = nodeResult.nodes;
+    const droppedNodes         = nodeResult.droppedNodes;
+    const visibilityMismatches = nodeResult.visibilityMismatches ?? [];
 
     // ── REDIRECT SCOPE CHECK — final rendered URL must remain on rootHost ──────
     // A server-side redirect may navigate the browser to a different hostname.
@@ -395,9 +452,53 @@ export async function runAnalysis({ jobId, originalUrl, requestUrl }) {
       (pageLinks.anchors?.length ?? 0) + (pageLinks.areas?.length ?? 0) + (pageLinks.formActions?.length ?? 0)
     } raw links`);
 
+    // ── Functional category classification ────────────────────────────────────
+    // Runs in Node.js space using already-extracted node metadata.
+    // Adds: functionalCategory, functionalCategoryCode, labelColor, categoryReason
+    classifyNodes(allNodes);
+    console.log('[phase1]  functional categories classified');
+
+    // ── Two-layer label filtering ─────────────────────────────────────────────
+    // Layer 1 (rawNodes = allNodes): full extraction for reasoning/debug
+    // Layer 2 (labelEligibleNodes):  only QA-meaningful nodes receive labels
+    // This keeps structural context intact while reducing screenshot noise.
+    const {
+      labelEligibleNodes,
+      debugEntries: labelDebugEntries,
+      filterStats:  labelFilterStats,
+    } = applyLabelFilter(allNodes, CONFIG.LABEL_FILTER);
+    console.log(
+      `[phase1]  label filter: ${labelEligibleNodes.length}/${allNodes.length} eligible` +
+      ` (mode=${CONFIG.LABEL_FILTER.labelMode}` +
+      ` drop=${labelFilterStats.droppedTotal}` +
+      ` decorative=${labelFilterStats.droppedDecorative}` +
+      ` dup=${labelFilterStats.droppedDuplicate})`
+    );
+
     const baselineAnnotatedPng = path.join(outDir, 'baseline-annotated.png');
-    await annotateScreenshot(basePage, selectAnnotationNodes(allNodes, CONFIG.ANNOTATION_LIMIT), baselineAnnotatedPng);
+    // Use only label-eligible nodes for annotation — keeps screenshots readable
+    const annotatedNodes = selectAnnotationNodes(labelEligibleNodes, CONFIG.ANNOTATION_LIMIT);
+    await annotateScreenshot(basePage, annotatedNodes, baselineAnnotatedPng);
     console.log('[phase1]  baseline-annotated.png saved');
+
+    // Write label filter debug artifact when enabled
+    if (CONFIG.LABEL_FILTER.debugFilter) {
+      await writeJson(path.join(outDir, 'label-filter-debug.json'), {
+        generatedAt:  new Date().toISOString(),
+        description:  'Per-node label filtering decisions. Use labelScore, labelEligible, and ' +
+                      'keepOrDropReason to tune LABEL_MODE / LABEL_MIN_SCORE thresholds.',
+        config:       CONFIG.LABEL_FILTER,
+        filterStats:  labelFilterStats,
+        entries:      labelDebugEntries,
+      });
+      console.log('[phase1]  label-filter-debug.json saved');
+    }
+
+    // Write annotation legend so consumers know what each color/code means.
+    // Legend counts are based on all raw nodes (full picture, not just labeled).
+    const legend = buildLegend(allNodes);
+    await writeJson(path.join(outDir, 'annotation-legend.json'), legend);
+    console.log('[phase1]  annotation-legend.json saved');
 
     await writeJson(path.join(outDir, 'static.json'), {
       pageMetadata: pageMeta,
@@ -413,6 +514,21 @@ export async function runAnalysis({ jobId, originalUrl, requestUrl }) {
         config: CONFIG.NODE_FILTER, keptNodes: allNodes, droppedNodes,
       });
       console.log('[phase1]  filtered-node-debug.json saved');
+    }
+
+    // Write visibility-debug.json whenever there are aria-hidden mismatches.
+    // A mismatch means aria-hidden="false" on an element that is not actually
+    // rendered, or aria-hidden="true" on an element that is visually present.
+    // These are common false-positive sources and are worth surfacing always.
+    if (visibilityMismatches.length > 0) {
+      await writeJson(path.join(outDir, 'visibility-debug.json'), {
+        generatedAt:     new Date().toISOString(),
+        totalMismatches: visibilityMismatches.length,
+        description:     'Elements where aria-hidden state contradicts actual CSS rendering. ' +
+                         'These are potential false-positive sources in DOM extraction.',
+        mismatches:      visibilityMismatches,
+      });
+      console.log(`[phase1]  visibility-debug.json saved — ${visibilityMismatches.length} mismatch(es)`);
     }
 
     console.log('[phase1]  discovering trigger candidates …');
@@ -449,10 +565,10 @@ export async function runAnalysis({ jobId, originalUrl, requestUrl }) {
     await writeJson(path.join(outDir, 'trigger-candidates.json'), allCandidates);
     await baseCtx.close();
 
-    console.log(`[phase1]  running trigger exploration … (workers=${CONFIG.MAX_PARALLEL_TRIGGER_WORKERS} mode=${CONFIG.TRIGGER_SCREENSHOT_MODE})`);
+    console.log(`[phase1]  running trigger exploration … (workers=${effectiveMaxTriggerWorkers} mode=${CONFIG.TRIGGER_SCREENSHOT_MODE})`);
     const { results: triggerResults, metrics: triggerMetrics } = await runTriggersParallel(
       browser, requestUrl, candidates, outDir, {
-        maxWorkers:                      CONFIG.MAX_PARALLEL_TRIGGER_WORKERS,
+        maxWorkers:                      effectiveMaxTriggerWorkers,
         screenshotMode:                  CONFIG.TRIGGER_SCREENSHOT_MODE,
         fallbackToFullPageOnClipFailure: true,
         autoDynamicRegions,
@@ -461,6 +577,7 @@ export async function runAnalysis({ jobId, originalUrl, requestUrl }) {
         authDetectionEnabled:            CONFIG.AUTH_DETECTION_ENABLED,
         authScoreThreshold:              CONFIG.AUTH_SCORE_THRESHOLD,
         authMaybeThreshold:              CONFIG.AUTH_MAYBE_THRESHOLD,
+        storageStatePath,
       });
 
     // Write per-trigger JSON artifacts (independent files — safe to parallelise)
@@ -495,7 +612,18 @@ export async function runAnalysis({ jobId, originalUrl, requestUrl }) {
     const authSensitiveTriggerCount = allCandidates.filter((c) => c.authSensitiveHint).length;
 
     const phase1Summary = {
+      // ── Raw vs. labeled node counts ─────────────────────────────────────────
+      rawNodeCount:                     allNodes.length,
+      labelEligibleNodeCount:           labelEligibleNodes.length,
+      finalLabeledNodeCount:            annotatedNodes.length,
+      decorativeNodeDroppedCount:       labelFilterStats.droppedDecorative,
+      duplicateLabelDroppedCount:       labelFilterStats.droppedDuplicate,
+      lowQaValueDroppedCount:           labelFilterStats.droppedLowQaValue,
+      repeatedItemDroppedCount:         labelFilterStats.droppedRepeated,
+      labelMode:                        CONFIG.LABEL_FILTER.labelMode,
+      // ── Legacy field (kept for backward compatibility) ────────────────────
       staticComponentCount:             allNodes.length,
+      // ── Trigger exploration ───────────────────────────────────────────────
       triggerCandidateCount:            allCandidates.length,
       triggerExecutedCount:             executedCount,
       changedTriggerCount:              changedCount,
@@ -511,6 +639,9 @@ export async function runAnalysis({ jobId, originalUrl, requestUrl }) {
       authDetectedTriggerCount,         // triggers where auth was positively detected
       autoDynamicRegionCount:           autoDynamicRegions.length,
       triggerPerformance:               triggerMetrics,
+      // ── Async worker counts used for this page ────────────────────────────
+      maxParallelTriggers:              effectiveMaxTriggerWorkers,
+      maxParallelPreflightChecks:       effectiveMaxPreflightChecks,
       // Initial render stabilization summary
       initialStabilization: {
         blockerCount:          stabResult.blockerCount,
@@ -674,58 +805,75 @@ export async function runAnalysis({ jobId, originalUrl, requestUrl }) {
     const authRules = await loadAuthRules();
     console.log(`[phase3]  ${authRules.length} auth rule(s) loaded`);
 
+    // ── Bounded concurrent preflight checks ────────────────────────────────
+    // Independent HTTP checks — safe to parallelise; apiCtx is thread-safe.
+    // Concurrency is bounded by effectiveMaxPreflightChecks (env or request override).
+    const pfCandidates = classifiedCandidates.filter((c) => c.needsPreflight);
     const apiCtx = await playwrightRequest.newContext({ ignoreHTTPSErrors: true });
+    try {
+      if (pfCandidates.length > 0) {
+        let pfSlots   = Math.max(1, effectiveMaxPreflightChecks);
+        const pfWaiters = [];
+        const pfAcquire = () => {
+          if (pfSlots > 0) { pfSlots--; return Promise.resolve(); }
+          return new Promise((res) => pfWaiters.push(res));
+        };
+        const pfRelease = () => {
+          if (pfWaiters.length > 0) pfWaiters.shift()();
+          else pfSlots++;
+        };
 
-    for (let i = 0, pfNum = 0; i < classifiedCandidates.length; i++) {
-      const candidate = classifiedCandidates[i];
-      if (!candidate.needsPreflight) continue;
+        await Promise.all(pfCandidates.map(async (candidate, pfIdx) => {
+          await pfAcquire();
+          try {
+            console.log(`[phase3]  preflight ${pfIdx + 1}/${pfCandidates.length} — ${candidate.normalizedUrl}`);
 
-      pfNum++;
-      console.log(`[phase3]  preflight ${pfNum}/${newCount} — ${candidate.normalizedUrl}`);
+            let pf = await checkReachability(candidate.normalizedUrl, apiCtx);
 
-      let pf = await checkReachability(candidate.normalizedUrl, apiCtx);
+            if (pf.reachableClass === 'auth_required') {
+              const rule = matchAuthRule(candidate.normalizedUrl, authRules);
+              if (rule) {
+                console.log(`[phase3]   → auth rule "${rule.ruleId}" matched, retrying …`);
+                const retry = await retryWithStorageState(candidate.normalizedUrl, rule, browser);
+                pf = { ...pf, ...retry, matchedRuleId: rule.ruleId, storageStatePath: rule.storageStatePath, recheckedWithAuth: true };
+              } else {
+                pf = { ...pf, reachableClass: 'user_input_required', reason: 'Auth required but no matching rule', matchedRuleId: null, storageStatePath: null, recheckedWithAuth: false };
+              }
+            } else {
+              pf = { ...pf, matchedRuleId: null, storageStatePath: null, recheckedWithAuth: false };
+            }
 
-      // Auth rule matching
-      if (pf.reachableClass === 'auth_required') {
-        const rule = matchAuthRule(candidate.normalizedUrl, authRules);
-        if (rule) {
-          console.log(`[phase3]   → auth rule "${rule.ruleId}" matched, retrying …`);
-          const retry = await retryWithStorageState(candidate.normalizedUrl, rule, browser);
-          pf = { ...pf, ...retry, matchedRuleId: rule.ruleId, storageStatePath: rule.storageStatePath, recheckedWithAuth: true };
-        } else {
-          pf = { ...pf, reachableClass: 'user_input_required', reason: 'Auth required but no matching rule', matchedRuleId: null, storageStatePath: null, recheckedWithAuth: false };
-        }
-      } else {
-        pf = { ...pf, matchedRuleId: null, storageStatePath: null, recheckedWithAuth: false };
+            candidate.preflightResult = pf;
+
+            switch (pf.reachableClass) {
+              case 'reachable_now':
+              case 'redirect_but_reachable':
+                candidate.decision      = 'enqueue_now';
+                candidate.enqueueReason = 'same host and new unique path, eligible for future exploration';
+                break;
+              case 'reachable_with_auth':
+                candidate.decision      = 'enqueue_now';
+                candidate.enqueueReason = 'accessible with stored auth credentials, eligible for future exploration';
+                break;
+              case 'auth_required':
+              case 'user_input_required':
+                candidate.decision   = 'hold_auth_required';
+                candidate.skipReason = `held because pre-flight indicates authentication required: ${pf.reason || 'no rule matched'}`;
+                break;
+              default:
+                candidate.decision   = 'hold_unreachable';
+                candidate.skipReason = `held because pre-flight failed: ${pf.reason || 'unknown error'}`;
+            }
+
+            console.log(`[phase3]   → ${candidate.decision}`);
+          } finally {
+            pfRelease();
+          }
+        }));
       }
-
-      candidate.preflightResult = pf;
-
-      // Map pre-flight result → enqueue decision vocabulary
-      switch (pf.reachableClass) {
-        case 'reachable_now':
-        case 'redirect_but_reachable':
-          candidate.decision      = 'enqueue_now';
-          candidate.enqueueReason = 'same host and new unique path, eligible for future exploration';
-          break;
-        case 'reachable_with_auth':
-          candidate.decision      = 'enqueue_now';
-          candidate.enqueueReason = 'accessible with stored auth credentials, eligible for future exploration';
-          break;
-        case 'auth_required':
-        case 'user_input_required':
-          candidate.decision  = 'hold_auth_required';
-          candidate.skipReason = `held because pre-flight indicates authentication required: ${pf.reason || 'no rule matched'}`;
-          break;
-        default:
-          candidate.decision  = 'hold_unreachable';
-          candidate.skipReason = `held because pre-flight failed: ${pf.reason || 'unknown error'}`;
-      }
-
-      console.log(`[phase3]   → ${candidate.decision}`);
+    } finally {
+      await apiCtx.dispose();
     }
-
-    await apiCtx.dispose();
 
     // ── Step 5: Upsert candidate nodes and edges in graph ─────────────────────
     let graphNodeCreatedCount = 0, graphNodeReusedCount = 0;
@@ -821,14 +969,25 @@ export async function runAnalysis({ jobId, originalUrl, requestUrl }) {
     const holdCount       = queueItems.filter((i) => i.enqueueDecision.startsWith('hold_')).length;
     const skippedCount    = queueItems.filter((i) => i.enqueueDecision.startsWith('skip_')).length;
 
+    // URLs immediately available for BFS enqueue (pre-flighted, same scope, new path)
+    const nextQueueUrls = queueItems
+      .filter((i) => i.enqueueDecision === 'enqueue_now')
+      .map((i) => i.targetUrl);
+
+    // Auth-gated URLs discovered via trigger navigation (for crawl-level auth handling)
+    const authGatedUrls = authGatedDiscoveries
+      .map((d) => d.targetUrl)
+      .filter(Boolean);
+
     console.log(`[phase3]  ${queueReadyCount} enqueue_now | ${holdCount} held | ${skippedCount} skipped`);
     console.log('[phase3] ── complete ──────────────────────────');
 
     // ── 7. Mark input node as fully analyzed ─────────────────────────────────
     markNodeAnalyzed(graph, inputIdentity.dedupKey, 'success');
 
-    // ── 8. Persist graph and write snapshot ──────────────────────────────────
-    await saveGraph(graph);
+    // ── 8. Write graph snapshot ───────────────────────────────────────────────
+    // Graph is per-request (in-memory only). saveGraph no longer exists.
+    // When running inside a crawl, crawlRunner owns the graph lifecycle.
     await saveSnapshot(outDir, graph);
     console.log(`[graph]  saved  nodes=${Object.keys(graph.nodes).length}  edges=${Object.keys(graph.edges).length}`);
 
@@ -981,6 +1140,19 @@ export async function runAnalysis({ jobId, originalUrl, requestUrl }) {
       rootHost,
       requestHost,
       reason:            'request URL is inside the original URL scope',
+      // ── BFS crawl consumer helpers ────────────────────────────────────────
+      // nextQueueUrls: URLs ready to be enqueued immediately (enqueue_now decision)
+      // authGatedUrls: login-page URLs discovered via trigger navigation
+      // inputPage:     graph identity of the page that was just analyzed
+      nextQueueUrls,
+      authGatedUrls,
+      inputPage: {
+        requestUrl,
+        finalUrl,
+        nodeId:           inputNode.nodeId,
+        dedupKey:         inputIdentity.dedupKey,
+        graphNodeCreated: inputNodeCreated,
+      },
       summary: {
         phase1: phase1Summary,
         phase3: {
@@ -998,7 +1170,7 @@ export async function runAnalysis({ jobId, originalUrl, requestUrl }) {
     };
 
   } finally {
-    if (browser) await browser.close().catch(() => {});
+    if (_ownsBrowser && browser) await browser.close().catch(() => {});
   }
 }
 

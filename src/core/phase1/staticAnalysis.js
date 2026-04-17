@@ -169,8 +169,12 @@ export async function extractStaticNodes(page, opts = {}) {
         score += 2;
         reasons.push('has_role');
       }
-      // Any aria-* attribute
-      const hasAria = Array.from(el.attributes).some((a) => a.name.startsWith('aria-'));
+      // Any meaningful aria-* attribute.
+      // Explicitly excludes aria-hidden: aria-hidden="false" must not inflate
+      // quality scores — it is not proof the element is visible or meaningful.
+      const hasAria = Array.from(el.attributes).some(
+        (a) => a.name.startsWith('aria-') && a.name !== 'aria-hidden'
+      );
       if (hasAria) {
         score += 2;
         reasons.push('has_aria');
@@ -390,14 +394,210 @@ export async function extractStaticNodes(page, opts = {}) {
       return false;
     }
 
+    // ── Three-tier visibility model ───────────────────────────────────────────
+    //
+    // Separates three distinct concepts that are often confused:
+    //
+    //   visuallyVisible      — the element is CSS-rendered and has real geometry
+    //   accessibilityVisible — the element is exposed to the accessibility tree
+    //   interactiveVisible   — the element is currently actionable by a user
+    //
+    // DESIGN RULE: aria-hidden="false" is NOT treated as a positive keep signal.
+    // ARIA is advisory metadata; actual rendering and geometry take priority.
+    //
+    // Pre-build ancestor-lookup sets once per page.evaluate() call.
+    // This avoids re-querying the DOM for every element in the main loop.
+    const _ariaHiddenTrueRoots = new Set(document.querySelectorAll('[aria-hidden="true"]'));
+    const _inertRoots          = new Set(document.querySelectorAll('[inert]'));
+
+    /** Walk up: return true if any ancestor has aria-hidden="true". */
+    function isInAriaHiddenSubtree(el) {
+      let p = el.parentElement;
+      while (p && p !== document.documentElement) {
+        if (_ariaHiddenTrueRoots.has(p)) return true;
+        p = p.parentElement;
+      }
+      return false;
+    }
+
+    /** Walk up (inclusive of self): return true if any ancestor/self has inert. */
+    function isInInertSubtree(el) {
+      let p = el;
+      while (p && p !== document.documentElement) {
+        if (_inertRoots.has(p)) return true;
+        p = p.parentElement;
+      }
+      return false;
+    }
+
+    /**
+     * Detect top-layer overlays (open dialogs, large fixed sheets, aria-modal).
+     * Called once before the main extraction loop — not per element.
+     * Returns an array sorted by z-index descending.
+     */
+    function detectTopLayerOverlays() {
+      const overlays = [];
+      const vw = window.innerWidth, vh = window.innerHeight;
+      const vpArea = vw * vh || 1;
+
+      // 1. Native <dialog open> — the browser's actual top-layer mechanism
+      for (const dlg of document.querySelectorAll('dialog[open]')) {
+        const s = window.getComputedStyle(dlg);
+        if (s.display === 'none') continue;
+        const r = dlg.getBoundingClientRect();
+        if (r.width * r.height < vpArea * 0.04) continue;
+        overlays.push({ el: dlg, rect: r, zIndex: 999999, isNativeDialog: true });
+      }
+
+      // 2. ARIA modal roles / aria-modal=true with significant coverage
+      for (const el of document.querySelectorAll('[role="dialog"],[role="alertdialog"],[aria-modal="true"]')) {
+        const s = window.getComputedStyle(el);
+        if (s.display === 'none' || s.visibility === 'hidden') continue;
+        const pos = s.position;
+        if (pos !== 'fixed' && pos !== 'absolute' && pos !== 'sticky') continue;
+        const zi = parseInt(s.zIndex) || 0;
+        if (zi < 20) continue;
+        const r = el.getBoundingClientRect();
+        if (r.width * r.height < vpArea * 0.04) continue;
+        if (!overlays.some((o) => o.el === el))
+          overlays.push({ el, rect: r, zIndex: zi, isNativeDialog: false });
+      }
+
+      // 3. Fixed direct body-children with high z-index + large coverage
+      for (const el of document.body.children) {
+        const s = window.getComputedStyle(el);
+        if (s.display === 'none' || s.visibility === 'hidden') continue;
+        if (s.position !== 'fixed') continue;
+        const zi = parseInt(s.zIndex) || 0;
+        if (zi < 100) continue;
+        if (parseFloat(s.opacity) < 0.05) continue;
+        const r = el.getBoundingClientRect();
+        if (r.width * r.height < vpArea * 0.04) continue;
+        if (!overlays.some((o) => o.el === el))
+          overlays.push({ el, rect: r, zIndex: zi, isNativeDialog: false });
+      }
+
+      overlays.sort((a, b) => b.zIndex - a.zIndex);
+      return overlays;
+    }
+
+    /**
+     * Return true if el's center point is covered by any detected overlay,
+     * excluding the overlay itself and its own descendants.
+     */
+    function isBlockedByOverlay(el, rect, overlays) {
+      const cx = rect.left + rect.width  / 2;
+      const cy = rect.top  + rect.height / 2;
+      for (const ov of overlays) {
+        if (ov.el === el || ov.el.contains(el)) continue;
+        const o = ov.rect;
+        if (cx >= o.left && cx <= o.right && cy >= o.top && cy <= o.bottom) return true;
+      }
+      return false;
+    }
+
+    /**
+     * Compute the three-tier visibility model for one element.
+     *
+     *   visuallyVisible      — element is CSS-rendered, not hidden, has geometry
+     *   accessibilityVisible — element is exposed to the accessibility tree
+     *   interactiveVisible   — element is currently actionable
+     *
+     * PRIORITY: rendering > interactability > ARIA hints
+     *
+     * aria-hidden="false" gives NO positive signal — it only overrides an ancestor
+     * aria-hidden="true" for accessibility purposes and does NOT imply the element
+     * is rendered or interactable.  Real geometry and CSS always take priority.
+     */
+    function computeVisibility(el, rect, style, topLayerOverlays) {
+      const reasons = [];
+
+      // ── 1. CSS / HTML attribute rendering checks ──────────────────────────
+      let hiddenByCss = false;
+      if (style.display === 'none')          { hiddenByCss = true; reasons.push('css_display_none'); }
+      if (style.visibility === 'hidden')     { hiddenByCss = true; reasons.push('css_visibility_hidden'); }
+      if (parseFloat(style.opacity) < 0.05)  { hiddenByCss = true; reasons.push('css_opacity_zero'); }
+      // html `hidden` attribute maps to display:none via UA stylesheet; record
+      // it explicitly so debug output shows the true cause.
+      if (el.hasAttribute('hidden'))         { hiddenByCss = true; reasons.push('attr_html_hidden'); }
+
+      // ── 2. Size ───────────────────────────────────────────────────────────
+      const tooSmall = rect.width < 2 || rect.height < 2;
+      if (tooSmall) reasons.push('too_small');
+
+      // ── 3. Inert subtree ──────────────────────────────────────────────────
+      const isInert = isInInertSubtree(el);
+      if (isInert) reasons.push('inert_subtree');
+
+      // ── 4. Overlay occlusion ──────────────────────────────────────────────
+      // The element IS CSS-rendered but is occluded by a top-layer overlay.
+      // We track this separately from visuallyVisible (the element has real
+      // geometry) — overlay-awareness is mainly used by trigger candidate logic.
+      let blockedByOverlay = false;
+      if (!hiddenByCss && !tooSmall && topLayerOverlays.length > 0) {
+        blockedByOverlay = isBlockedByOverlay(el, rect, topLayerOverlays);
+        if (blockedByOverlay) reasons.push('blocked_by_overlay');
+      }
+
+      // ── 5. ARIA model (advisory only) ─────────────────────────────────────
+      const ariaHiddenValue      = el.getAttribute('aria-hidden'); // "true"|"false"|null
+      const hiddenByAncestorAria = isInAriaHiddenSubtree(el);
+      let accessibilityVisible   = true;
+      if (ariaHiddenValue === 'true')  { accessibilityVisible = false; reasons.push('aria_hidden_true_self'); }
+      if (hiddenByAncestorAria)        { accessibilityVisible = false; reasons.push('aria_hidden_ancestor'); }
+      // aria-hidden="false" gives NO keep bonus — it is not a positive visibility
+      // signal in this model.  It only weakly overrides an ancestor aria-hidden="true"
+      // at the accessibility tree level, and has no effect on rendering.
+
+      // ── 6. Composed visuallyVisible ───────────────────────────────────────
+      // blockedByOverlay is intentionally NOT included: the element IS rendered
+      // (it has real CSS geometry), it is just visually occluded.  Callers that
+      // need overlay-awareness check vis.blockedByOverlay explicitly.
+      const visuallyVisible = !hiddenByCss && !tooSmall && !isInert;
+
+      // ── 7. interactiveVisible ─────────────────────────────────────────────
+      const isDisabled    = el.disabled === true || el.getAttribute('aria-disabled') === 'true';
+      const noPointerEvts = style.pointerEvents === 'none';
+      const interactiveVisible = visuallyVisible && !isDisabled && !isInert && !blockedByOverlay && !noPointerEvts;
+
+      // ── 8. Mismatch annotations ───────────────────────────────────────────
+      // Surface cases where ARIA state contradicts actual rendering.
+      // These are kept as debug tokens on visibilityReasons.
+      if (ariaHiddenValue === 'false') {
+        if (!visuallyVisible)       reasons.push('mismatch__aria_false_but_not_rendered');
+        if (tooSmall)               reasons.push('mismatch__aria_false_but_zero_area');
+        if (blockedByOverlay)       reasons.push('mismatch__aria_false_but_overlay_blocked');
+        if (hiddenByAncestorAria)   reasons.push('mismatch__aria_false_but_ancestor_aria_true');
+      }
+      if (ariaHiddenValue === 'true' && visuallyVisible) {
+        reasons.push('mismatch__aria_true_but_visually_present');
+      }
+
+      return {
+        visuallyVisible,
+        accessibilityVisible,
+        interactiveVisible,
+        ariaHiddenValue,
+        hiddenByAncestorAria,
+        hiddenByCss,
+        blockedByOverlay,
+        isInert,
+        visibilityReasons: reasons,
+      };
+    }
+
     // ── Main extraction loop ──────────────────────────────────────────────────
 
     const scrollX = window.scrollX;
     const scrollY = window.scrollY;
     const vw      = window.innerWidth;
-    const nodes       = [];
-    const droppedNodes = [];
+    const nodes             = [];
+    const droppedNodes      = [];
+    const visibilityMismatches = [];
     let counter = 0;
+
+    // Detect top-layer overlays once before the loop.
+    const topLayerOverlays = detectTopLayerOverlays();
 
     for (const el of document.querySelectorAll('*')) {
       const tag = el.tagName.toLowerCase();
@@ -406,20 +606,37 @@ export async function extractStaticNodes(page, opts = {}) {
       if (el === document.body) continue;
 
       const rect = el.getBoundingClientRect();
-      if (rect.width < 2 || rect.height < 2) continue;
 
-      // Skip elements whose horizontal extent lies completely outside the
-      // viewport (e.g. off-screen carousel items clipped by overflow:hidden).
+      // Quick positional pre-filters (cheap) before the full visibility model.
+      // isClippedByParent also uses rect, so keep it here.
       if (rect.right < 0 || rect.left > vw) continue;
-
-      // Skip elements that are visually invisible because a parent with
-      // overflow:hidden clips them outside that parent's visible rect.
       if (isClippedByParent(el, rect)) continue;
 
       const style = window.getComputedStyle(el);
-      if (style.display === 'none')         continue;
-      if (style.visibility === 'hidden')    continue;
-      if (parseFloat(style.opacity) < 0.05) continue;
+
+      // ── Three-tier visibility check ────────────────────────────────────────
+      // Replaces the old flat CSS-only checks.  visuallyVisible is the gate;
+      // the full vis object is stored on the node for audit / Phase 2 use.
+      const vis = computeVisibility(el, rect, style, topLayerOverlays);
+
+      if (!vis.visuallyVisible) {
+        // Collect aria-hidden mismatch cases for outputs/{jobId}/visibility-debug.json
+        if (vis.visibilityReasons.some((r) => r.startsWith('mismatch__'))) {
+          visibilityMismatches.push({
+            selectorHint:     buildSelectorHint(el),
+            tagName:          tag,
+            ariaHiddenValue:  vis.ariaHiddenValue,
+            visibilityReasons: vis.visibilityReasons,
+            bbox: {
+              x:      Math.round(rect.x + scrollX),
+              y:      Math.round(rect.y + scrollY),
+              width:  Math.round(rect.width),
+              height: Math.round(rect.height),
+            },
+          });
+        }
+        continue;
+      }
 
       const text = getDirectText(el);
       const role = el.getAttribute('role') || null;
@@ -461,13 +678,26 @@ export async function extractStaticNodes(page, opts = {}) {
         href:          el.getAttribute('href') || null,
         type:          el.getAttribute('type') || null,
         bbox,
-        isVisible:     true,
+        isVisible:     vis.visuallyVisible,
         selectorHint:  buildSelectorHint(el),
         group:         classifyElement(el),
         qualityScore,
         qualityReasons,
         focusScore,
         focusReasons,
+        // Three-tier visibility model metadata — kept on every node for
+        // audit, quality reporting, and future Phase 2 / VLM consumption.
+        visibility: {
+          visuallyVisible:      vis.visuallyVisible,
+          accessibilityVisible: vis.accessibilityVisible,
+          interactiveVisible:   vis.interactiveVisible,
+          ariaHiddenValue:      vis.ariaHiddenValue,
+          hiddenByAncestorAria: vis.hiddenByAncestorAria,
+          hiddenByCss:          vis.hiddenByCss,
+          blockedByOverlay:     vis.blockedByOverlay,
+          isInert:              vis.isInert,
+          visibilityReasons:    vis.visibilityReasons,
+        },
       };
 
       if (keep) {
@@ -477,7 +707,7 @@ export async function extractStaticNodes(page, opts = {}) {
       }
     }
 
-    return { nodes, droppedNodes };
+    return { nodes, droppedNodes, visibilityMismatches };
 
   }, cfg);
 }

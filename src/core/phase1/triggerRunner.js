@@ -44,7 +44,9 @@ import { MUTATION_TRACKER_SCRIPT, installMutationTracker,
          getMutations, resetMutations }                            from './mutationTracker.js';
 import { extractStaticNodes }                                      from './staticAnalysis.js';
 import { annotateScreenshot }                                      from '../annotate.js';
-import { compareNodeSets, extractNewRegions }                      from '../compare.js';
+import { classifyNodes }                                           from '../functionalClassifier.js';
+import { applyLabelFilter }                                        from '../labelFilter.js';
+import { computeTriggerDelta, extractNewRegions }                  from '../compare.js';
 import { sleep }                                                   from '../utils.js';
 import { isInAutoDynamicRegion, freezeCssAnimations }              from './autoDynamicDetector.js';
 import { classifyAuthNavigation, collectNavPageMeta }               from './authNavigationClassifier.js';
@@ -57,7 +59,17 @@ const TRIGGER_QUIET_MS      = parseInt(process.env.TRIGGER_QUIET_MS      || '600
 // Initial wait (ms) after the action before polling starts
 // (lets the browser start the first mutations before we measure).
 const TRIGGER_INITIAL_MS    = parseInt(process.env.TRIGGER_INITIAL_MS    || '200',  10);
-// Network-idle fallback timeout (ms) after mutations settle.
+// ── Label filter options for trigger-level screenshots ─────────────────────
+// Use 'dense' mode so only clear decorative noise is suppressed — trigger
+// nodes are already a small changed set, and we want all meaningful changes
+// visible.  Parent/child and repeated-item suppression are disabled because
+// the context is too narrow for those heuristics to be safe here.
+const TRIGGER_LABEL_FILTER_OPTS = {
+  labelMode:                               'dense',
+  suppressChildLabelsWhenParentIsSufficient: false,
+  preferGroupLabelingForRepeatedItems:       false,
+  maxLabelsPerViewport:                     60,
+};// Network-idle fallback timeout (ms) after mutations settle.
 const TRIGGER_NETWORK_MS    = parseInt(process.env.TRIGGER_NETWORK_MS    || '2500', 10);
 
 // Viewport width used to detect full-width layout wrappers in newNodes.
@@ -94,6 +106,10 @@ export async function runTrigger(browser, url, candidate, outDir, opts = {}) {
     authDetectionEnabled            = true,
     authScoreThreshold              = 5,
     authMaybeThreshold              = 3,
+    // Optional Playwright storageState path.  When provided, each fresh context
+    // used for trigger execution will be initialised with the stored session
+    // (cookies, localStorage) so authenticated pages behave correctly.
+    storageStatePath                = null,
   } = opts;
 
   // Derive rootHost from the page URL. requestUrl has already been validated
@@ -106,7 +122,7 @@ export async function runTrigger(browser, url, candidate, outDir, opts = {}) {
   let context;
   try {
     // ── 1. Fresh context with mutation observer ───────────────────────────────
-    context = await createFreshContext(browser);
+    context = await createFreshContext(browser, { storageState: storageStatePath });
     await context.addInitScript(MUTATION_TRACKER_SCRIPT);
 
     const page = await context.newPage();
@@ -293,41 +309,74 @@ export async function runTrigger(browser, url, candidate, outDir, opts = {}) {
     const mutations = await getMutations(page).catch(() => []);
 
     // ── 6. Compare before / after ─────────────────────────────────────────────
-    const { newNodes: rawNewNodes } = compareNodeSets(beforeNodes, afterNodes);
+    // ── 6. Delta analysis (delta-only labeling) ───────────────────────────────
+    //
+    // computeTriggerDelta performs multi-tier matching (DOM id → class selector
+    // → text+tag → position) so baseline elements displaced by layout reflow
+    // are identified as matched/unchanged and excluded from the label set.
+    //
+    // deltaLabelNodes = newNodes + newlyVisibleNodes + changedNodes only.
+    // Unchanged baseline elements are kept in unchangedNodes and never labeled.
+    const rawDelta = computeTriggerDelta(beforeNodes, afterNodes, mutations);
 
-    // ── Noise filters ──────────────────────────────────────────────────────────
+    // ── Noise filters on the delta set ────────────────────────────────────────
     //
-    // 1. Full-width layout wrappers: nodes that span ≥90 % of the viewport width
-    //    and start at x≈0, y≈0 appear as "new" only because they were
-    //    re-measured at a different height after the trigger (the root content
-    //    div grew to accommodate an injected panel).  They carry no UI signal.
+    // 1. Full-width layout wrappers: delta nodes spanning ≥90 % of the viewport
+    //    width at x≈0, y≈0 are layout containers that grew or shrank due to the
+    //    trigger but carry no direct UI signal.
     //
-    // 2. Auto-dynamic regions: nodes that overlap known background-cycling areas
-    //    (e.g. carousel slides, news tickers) are background noise unrelated to
+    // 2. Auto-dynamic regions: delta nodes that overlap known background-cycling
+    //    areas (carousel slides, news tickers) are background noise unrelated to
     //    the trigger.  Removed when autoDynamicRegions were detected earlier.
-    const newNodes = rawNewNodes
-      .filter((n) => !(n.bbox.x <= 4 && n.bbox.y <= 4 && n.bbox.width >= VIEWPORT_WIDTH * 0.9))
-      .filter(
-        autoDynamicRegions.length
-          ? (n) => !isInAutoDynamicRegion(n.bbox, autoDynamicRegions, autoDynamicOverlapThreshold)
-          : () => true,
-      );
-    const backgroundNoiseCount = rawNewNodes.length - newNodes.length;
-    const newRegions   = extractNewRegions(newNodes);
+    function _applyNoiseFilters(nodes) {
+      return nodes
+        .filter((n) => !(n.bbox.x <= 4 && n.bbox.y <= 4 && n.bbox.width >= VIEWPORT_WIDTH * 0.9))
+        .filter(
+          autoDynamicRegions.length
+            ? (n) => !isInAutoDynamicRegion(n.bbox, autoDynamicRegions, autoDynamicOverlapThreshold)
+            : () => true,
+        );
+    }
 
-    // ── 7. Screenshots (mode-dependent) ──────────────────────────────────────    // Wait for visual rendering to be fully committed before capturing.
-    // DOM mutations settling (step 3) guarantees the DOM tree is correct but
-    // the browser may still be:
-    //   • running CSS transitions/animations (e.g. dropdown slide-in, fade-in)
-    //   • calculating layout / painting the updated pixels
-    // We wait for the “loudest” in-flight transition to end (max 800 ms) then
-    // flush layout+paint with a double requestAnimationFrame before injecting
-    // the red-box overlay and taking the final screenshot.
+    const newNodes          = _applyNoiseFilters(rawDelta.newNodes);
+    const newlyVisibleNodes = _applyNoiseFilters(rawDelta.newlyVisibleNodes);
+    const changedNodes      = _applyNoiseFilters(rawDelta.changedNodes);
+    const deltaLabelNodes   = [...newNodes, ...newlyVisibleNodes, ...changedNodes];
+
+    const rawDeltaTotal        = rawDelta.deltaLabelNodes.length;
+    const backgroundNoiseCount = rawDeltaTotal - deltaLabelNodes.length;
+    const newRegions           = extractNewRegions(deltaLabelNodes);
+
+    // ── 6b. Diff-debug output ─────────────────────────────────────────────────
+    // Writes {triggerId}-diff-debug.json so labeling focus can be verified.
+    const debugPath = path.join(resultsDir, `${triggerId}-diff-debug.json`);
+    await fs.writeFile(debugPath, JSON.stringify({
+      triggerId,
+      _note: 'Delta computed by computeTriggerDelta multi-tier matching. Unchanged baseline nodes excluded from annotation.',
+      baselineVisibleNodeCount:  beforeNodes.length,
+      afterVisibleNodeCount:     afterNodes.length,
+      newNodeCount:              newNodes.length,
+      newlyVisibleNodeCount:     newlyVisibleNodes.length,
+      changedNodeCount:          changedNodes.length,
+      unchangedNodesCount:       rawDelta.unchangedNodesCount,
+      backgroundNoiseCount,
+      deltaLabelNodesCount:      deltaLabelNodes.length,
+      newNodeIds:                newNodes.map((n) => n.nodeId),
+      newlyVisibleNodeIds:       newlyVisibleNodes.map((n) => n.nodeId),
+      changedNodeIds:            changedNodes.map((n) => n.nodeId),
+      finalLabeledDeltaNodeIds:  deltaLabelNodes.map((n) => n.nodeId),
+      ignoredUnchangedNodeCount: rawDelta.unchangedNodesCount,
+    }, null, 2));
+
+    // ── 7. Screenshots (mode-dependent) ───────────────────────────────────────
+    // Wait for visual rendering to be fully committed before capturing.
     await _waitForVisualRender(page);
     const afterPath     = path.join(resultsDir, `${triggerId}-after.png`);
     const annotatedPath = path.join(resultsDir, `${triggerId}-annotated.png`);
+    // Pass only deltaLabelNodes — NOT the full afterNodes list.
+    // Trigger-result annotations show only what the trigger changed.
     await _captureAfterScreenshots(
-      page, newNodes, afterPath, annotatedPath,
+      page, deltaLabelNodes, afterPath, annotatedPath,
       screenshotMode, fallbackToFullPageOnClipFailure,
     );
 
@@ -337,20 +386,26 @@ export async function runTrigger(browser, url, candidate, outDir, opts = {}) {
     const relBase = path.join('outputs', path.basename(outDir), 'trigger-results');
     return {
       triggerId,
-      action:              triggerType,
-      status:              actionError ? 'failed' : 'success',
+      action:               triggerType,
+      status:               actionError ? 'failed' : 'success',
       screenshotMode,
-      beforeScreenshot:    screenshotMode === 'fullPage'
+      beforeScreenshot:     screenshotMode === 'fullPage'
         ? _unix(path.join(relBase, `${triggerId}-before.png`))
-        : null, // not captured — saves one fullPage screenshot per trigger
-      afterScreenshot:     _unix(path.join(relBase, `${triggerId}-after.png`)),
-      annotatedScreenshot: _unix(path.join(relBase, `${triggerId}-annotated.png`)),
-      mutationCount:       mutations.length,
-      mutations:           mutations.slice(0, 100),
-      newNodes:            newNodes.slice(0, 50),
+        : null,
+      afterScreenshot:      _unix(path.join(relBase, `${triggerId}-after.png`)),
+      annotatedScreenshot:  _unix(path.join(relBase, `${triggerId}-annotated.png`)),
+      diffDebug:            _unix(path.join(relBase, `${triggerId}-diff-debug.json`)),
+      mutationCount:        mutations.length,
+      mutations:            mutations.slice(0, 100),
+      newNodes:             newNodes.slice(0, 50),
+      newlyVisibleNodes:    newlyVisibleNodes.slice(0, 50),
+      changedNodes:         changedNodes.slice(0, 50),
+      deltaLabelNodes:      deltaLabelNodes.slice(0, 50),
+      unchangedNodesCount:  rawDelta.unchangedNodesCount,
+      deltaLabelNodesCount: deltaLabelNodes.length,
       backgroundNoiseCount,
       newRegions,
-      summary:             _buildSummary(candidate, newNodes, mutations, actionError),
+      summary:              _buildSummary(candidate, deltaLabelNodes, mutations, actionError),
       ...(actionError ? { error: actionError } : {}),
     };
 
@@ -358,19 +413,24 @@ export async function runTrigger(browser, url, candidate, outDir, opts = {}) {
     if (context) await context.close().catch(() => {});
     return {
       triggerId,
-      action:              candidate.triggerType,
-      status:              'failed',
+      action:               candidate.triggerType,
+      status:               'failed',
       screenshotMode,
-      beforeScreenshot:    null,
-      afterScreenshot:     null,
-      annotatedScreenshot: null,
-      mutationCount:       0,
-      mutations:           [],
-      newNodes:            [],
+      beforeScreenshot:     null,
+      afterScreenshot:      null,
+      annotatedScreenshot:  null,
+      mutationCount:        0,
+      mutations:            [],
+      newNodes:             [],
+      newlyVisibleNodes:    [],
+      changedNodes:         [],
+      deltaLabelNodes:      [],
+      unchangedNodesCount:  0,
+      deltaLabelNodesCount: 0,
       backgroundNoiseCount: 0,
-      newRegions:          [],
-      summary:             `Exception: ${err.message}`,
-      error:               err.message,
+      newRegions:           [],
+      summary:              `Exception: ${err.message}`,
+      error:                err.message,
     };
   }
 }
@@ -387,11 +447,25 @@ export async function runTrigger(browser, url, candidate, outDir, opts = {}) {
  *                 reserved for element-level screenshot in future)
  */
 async function _captureAfterScreenshots(page, newNodes, afterPath, annotatedPath, mode, fallback) {
+  // Classify nodes into functional categories (adds labelColor, functionalCategoryCode, etc.)
+  // so annotateScreenshot renders multi-color labeled boxes instead of plain red.
+  if (newNodes.length > 0) classifyNodes(newNodes);
+
+  // Apply label filter — 'dense' mode removes only clear decorative noise.
+  // Parent/child and repeated-item suppression are disabled: trigger changed-node
+  // sets are small, and all distinct changes should remain visible.
+  let nodesToLabel = newNodes;
+  if (newNodes.length > 0) {
+    const { labelEligibleNodes } = applyLabelFilter(newNodes, TRIGGER_LABEL_FILTER_OPTS);
+    // Safety fallback: if filter removed everything, use all classified nodes
+    if (labelEligibleNodes.length > 0) nodesToLabel = labelEligibleNodes;
+  }
+
   switch (mode) {
     case 'fullPage': {
       await page.screenshot({ path: afterPath, fullPage: true });
-      if (newNodes.length > 0) {
-        await annotateScreenshot(page, newNodes.slice(0, 60), annotatedPath);
+      if (nodesToLabel.length > 0) {
+        await annotateScreenshot(page, nodesToLabel.slice(0, 60), annotatedPath);
       } else {
         await fs.copyFile(afterPath, annotatedPath);
       }
@@ -402,8 +476,8 @@ async function _captureAfterScreenshots(page, newNodes, afterPath, annotatedPath
       // Viewport-only: cheap, no region clipping.
       // Annotated uses the same viewport shot but with red-box overlay injected.
       await page.screenshot({ path: afterPath, fullPage: false });
-      if (newNodes.length > 0) {
-        await annotateScreenshot(page, newNodes.slice(0, 60), annotatedPath, { fullPage: false });
+      if (nodesToLabel.length > 0) {
+        await annotateScreenshot(page, nodesToLabel.slice(0, 60), annotatedPath, { fullPage: false });
       } else {
         await fs.copyFile(afterPath, annotatedPath);
       }
@@ -417,8 +491,8 @@ async function _captureAfterScreenshots(page, newNodes, afterPath, annotatedPath
       // Annotated: inject red-box overlay then clip to the union bbox of changed
       // nodes so the result shows exactly the changed region with boxes visible.
       await page.screenshot({ path: afterPath, fullPage: false });
-      if (newNodes.length > 0) {
-        const clip = _computeUnionBbox(newNodes, 24);
+      if (nodesToLabel.length > 0) {
+        const clip = _computeUnionBbox(nodesToLabel, 24);
         if (clip) {
           // bbox coords from extractStaticNodes are document-absolute
           // (rect.x + scrollX, rect.y + scrollY).
@@ -441,9 +515,9 @@ async function _captureAfterScreenshots(page, newNodes, afterPath, annotatedPath
           const screenshotOpts = clipFitsViewport
             ? { clip }
             : { fullPage: true, clip };
-          await annotateScreenshot(page, newNodes.slice(0, 60), annotatedPath, screenshotOpts);
+          await annotateScreenshot(page, nodesToLabel.slice(0, 60), annotatedPath, screenshotOpts);
         } else {
-          await annotateScreenshot(page, newNodes.slice(0, 60), annotatedPath, { fullPage: false });
+          await annotateScreenshot(page, nodesToLabel.slice(0, 60), annotatedPath, { fullPage: false });
         }
       } else {
         await fs.copyFile(afterPath, annotatedPath);

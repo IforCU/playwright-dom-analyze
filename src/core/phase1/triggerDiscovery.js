@@ -50,14 +50,141 @@ export async function findTriggerCandidates(page, autoDynamicRegions = [], overl
       return tag;
     }
 
-    function isVisible(el) {
-      const rect = el.getBoundingClientRect();
-      if (rect.width < 2 || rect.height < 2) return false;
+    // ── Three-tier visibility model ───────────────────────────────────────────
+    //
+    // Mirrors the model in staticAnalysis.js.  Built inside page.evaluate()
+    // so it has direct DOM access without a serialisation round-trip.
+    //
+    // Key rule: aria-hidden="false" is NOT a positive visibility signal.
+    // Real rendering and interactability take priority over ARIA hints.
+    //
+    // Pre-built lookup sets (one querySelectorAll each, amortised across all
+    // elements visited in the candidate loop below).
+    const _ariaHiddenTrueRoots = new Set(document.querySelectorAll('[aria-hidden="true"]'));
+    const _inertRoots          = new Set(document.querySelectorAll('[inert]'));
+
+    function _isInAriaHiddenSubtree(el) {
+      let p = el.parentElement;
+      while (p && p !== document.documentElement) {
+        if (_ariaHiddenTrueRoots.has(p)) return true;
+        p = p.parentElement;
+      }
+      return false;
+    }
+
+    function _isInInertSubtree(el) {
+      let p = el;
+      while (p && p !== document.documentElement) {
+        if (_inertRoots.has(p)) return true;
+        p = p.parentElement;
+      }
+      return false;
+    }
+
+    // Overlay detection — one-time call, result reused for every element below.
+    const _topLayerOverlays = (() => {
+      const result = [];
+      const vw = window.innerWidth, vh = window.innerHeight;
+      const vpArea = vw * vh || 1;
+      for (const dlg of document.querySelectorAll('dialog[open]')) {
+        const s = window.getComputedStyle(dlg);
+        if (s.display === 'none') continue;
+        const r = dlg.getBoundingClientRect();
+        if (r.width * r.height >= vpArea * 0.04)
+          result.push({ el: dlg, rect: r, zIndex: 999999 });
+      }
+      for (const el of document.querySelectorAll('[role="dialog"],[role="alertdialog"],[aria-modal="true"]')) {
+        const s = window.getComputedStyle(el);
+        if (s.display === 'none' || s.visibility === 'hidden') continue;
+        const pos = s.position;
+        if (pos !== 'fixed' && pos !== 'absolute' && pos !== 'sticky') continue;
+        const zi = parseInt(s.zIndex) || 0;
+        if (zi < 20) continue;
+        const r = el.getBoundingClientRect();
+        if (r.width * r.height < vpArea * 0.04) continue;
+        if (!result.some((o) => o.el === el)) result.push({ el, rect: r, zIndex: zi });
+      }
+      for (const el of document.body.children) {
+        const s = window.getComputedStyle(el);
+        if (s.display === 'none' || s.visibility === 'hidden') continue;
+        if (s.position !== 'fixed') continue;
+        const zi = parseInt(s.zIndex) || 0;
+        if (zi < 100 || parseFloat(s.opacity) < 0.05) continue;
+        const r = el.getBoundingClientRect();
+        if (r.width * r.height < vpArea * 0.04) continue;
+        if (!result.some((o) => o.el === el)) result.push({ el, rect: r, zIndex: zi });
+      }
+      result.sort((a, b) => b.zIndex - a.zIndex);
+      return result;
+    })();
+
+    /**
+     * Compute trigger-candidate visibility — three separate concerns.
+     *
+     *   visuallyVisible    — element is CSS-rendered and has real geometry
+     *   interactiveVisible — element is currently actionable (not disabled /
+     *                        inert / overlay-blocked / pointer-events:none)
+     *   rect               — cached bounding rect (avoids a second call)
+     *
+     * Trigger discovery requires BOTH visuallyVisible AND interactiveVisible.
+     * aria-hidden="false" is explicitly not used as a positive signal.
+     */
+    function computeTriggerVisibility(el) {
+      const rect  = el.getBoundingClientRect();
       const style = window.getComputedStyle(el);
-      if (style.display === 'none')          return false;
-      if (style.visibility === 'hidden')     return false;
-      if (parseFloat(style.opacity) < 0.05)  return false;
-      return true;
+      const reasons = [];
+
+      // ── Rendering (visuallyVisible) ──────────────────────────────────────
+      let hiddenByCss = false;
+      if (style.display === 'none')         { hiddenByCss = true; reasons.push('css_display_none'); }
+      if (style.visibility === 'hidden')    { hiddenByCss = true; reasons.push('css_visibility_hidden'); }
+      if (parseFloat(style.opacity) < 0.05) { hiddenByCss = true; reasons.push('css_opacity_zero'); }
+      if (el.hasAttribute('hidden'))         { hiddenByCss = true; reasons.push('attr_html_hidden'); }
+
+      const tooSmall = rect.width < 2 || rect.height < 2;
+      if (tooSmall) reasons.push('too_small');
+
+      const isInert = _isInInertSubtree(el);
+      if (isInert) reasons.push('inert_subtree');
+
+      const visuallyVisible = !hiddenByCss && !tooSmall && !isInert;
+
+      // ── ARIA (advisory only, no positive signal from aria-hidden="false") ─
+      const ariaHiddenValue      = el.getAttribute('aria-hidden');
+      const hiddenByAncestorAria = _isInAriaHiddenSubtree(el);
+      // Track mismatches for debug output but do NOT gate on accessibilityVisible —
+      // rendering is authoritative.
+      if (ariaHiddenValue === 'false' && !visuallyVisible)
+        reasons.push('mismatch__aria_false_but_not_rendered');
+      if (ariaHiddenValue === 'false' && tooSmall)
+        reasons.push('mismatch__aria_false_but_zero_area');
+      if (ariaHiddenValue === 'false' && hiddenByAncestorAria)
+        reasons.push('mismatch__aria_false_but_ancestor_aria_true');
+
+      // ── Overlay occlusion ────────────────────────────────────────────────
+      let blockedByOverlay = false;
+      if (visuallyVisible && _topLayerOverlays.length > 0) {
+        const cx = rect.left + rect.width  / 2;
+        const cy = rect.top  + rect.height / 2;
+        for (const ov of _topLayerOverlays) {
+          if (ov.el === el || ov.el.contains(el)) continue;
+          const o = ov.rect;
+          if (cx >= o.left && cx <= o.right && cy >= o.top && cy <= o.bottom) {
+            blockedByOverlay = true;
+            reasons.push(ariaHiddenValue === 'false'
+              ? 'mismatch__aria_false_but_overlay_blocked'
+              : 'blocked_by_overlay');
+            break;
+          }
+        }
+      }
+
+      // ── Interactability (interactiveVisible) ──────────────────────────────
+      const isDisabled    = el.disabled === true || el.getAttribute('aria-disabled') === 'true';
+      const noPointerEvts = style.pointerEvents === 'none';
+      const interactiveVisible = visuallyVisible && !isDisabled && !isInert && !blockedByOverlay && !noPointerEvts;
+
+      return { rect, visuallyVisible, interactiveVisible, reasons };
     }
 
     function getBbox(el) {
@@ -99,7 +226,8 @@ export async function findTriggerCandidates(page, autoDynamicRegions = [], overl
 
       for (const el of elements) {
         if (seen.has(el)) continue;
-        if (!isVisible(el)) { seen.add(el); continue; }
+        const _vis = computeTriggerVisibility(el);
+        if (!_vis.visuallyVisible || !_vis.interactiveVisible) { seen.add(el); continue; }
         seen.add(el);
 
         const tag  = el.tagName.toLowerCase();
@@ -168,8 +296,8 @@ export async function findTriggerCandidates(page, autoDynamicRegions = [], overl
         // Elements smaller than 22×22 px in BOTH dimensions are typically
         // icon-only decorators or status indicators (info icons, tiny badges)
         // rather than content-expansion triggers.
-        const _fr = el.getBoundingClientRect();
-        if (_fr.width < 22 && _fr.height < 22) continue;
+        // Reuse the rect already computed by computeTriggerVisibility().
+        if (_vis.rect.width < 22 && _vis.rect.height < 22) continue;
 
         // Prefer hover for tooltip-style elements (non-button, non-link, has title)
         let triggerType = 'click';

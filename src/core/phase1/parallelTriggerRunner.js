@@ -54,6 +54,7 @@ import { runTrigger } from './triggerRunner.js';
  *   authDetectionEnabled?:            boolean,  // run auth classification on nav-away (default true)
  *   authScoreThreshold?:              number,   // min score for 'auth-likely' (default 5)
  *   authMaybeThreshold?:              number,   // min score for 'maybe-auth' (default 3)
+ *   storageStatePath?:               string,   // Playwright storageState file for auth sessions (default null)
  * }} config
  * @returns {Promise<{ results: object[], metrics: object }>}
  */
@@ -68,6 +69,7 @@ export async function runTriggersParallel(browser, url, candidates, outDir, conf
     authDetectionEnabled            = true,
     authScoreThreshold              = 5,
     authMaybeThreshold              = 3,
+    storageStatePath                = null,
   } = config;
 
   if (candidates.length === 0) {
@@ -83,6 +85,7 @@ export async function runTriggersParallel(browser, url, candidates, outDir, conf
     authDetectionEnabled,
     authScoreThreshold,
     authMaybeThreshold,
+    storageStatePath,
   };
 
   // Pre-allocate slots — preserves input order regardless of completion order

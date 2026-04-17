@@ -1,12 +1,11 @@
 /**
  * core/graph/graphStore.js
  *
- * Persistent graph storage.
+ * Per-request in-memory graph.
  *
- * STORAGE LOCATIONS
- * ─────────────────
- * Persistent graph  : data/page-graph.json          (project root, survives across runs)
- * Per-job snapshot  : outputs/{jobId}/graph-snapshot.json  (point-in-time for debugging)
+ * The graph is no longer persisted to disk between requests.
+ * Each job starts with a fresh empty graph.
+ * The only disk artefact is the per-job snapshot written by saveSnapshot().
  *
  * GRAPH FORMAT
  * ────────────
@@ -21,50 +20,26 @@
 
 import fs   from 'fs/promises';
 import path from 'path';
-import { fileURLToPath } from 'url';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname  = path.dirname(__filename);
-
-// src/core/graph/ → 3 levels up → project root
-export const GRAPH_PATH = path.resolve(__dirname, '..', '..', '..', 'data', 'page-graph.json');
 
 const _empty = () => ({ nodes: {}, edges: {} });
 
-// ── Load ──────────────────────────────────────────────────────────────────────
+// ── Factory ───────────────────────────────────────────────────────────────────
 
 /**
- * Load the persistent graph.
- * Returns an empty graph structure if the file does not yet exist.
+ * Return a brand-new empty graph for a single job/request.
+ * No file I/O — the graph lives only in memory for the duration of the request.
  *
- * @returns {Promise<{ nodes: object, edges: object }>}
+ * @returns {{ nodes: object, edges: object }}
  */
-export async function loadGraph() {
-  try {
-    const raw = await fs.readFile(GRAPH_PATH, 'utf8');
-    return JSON.parse(raw);
-  } catch (err) {
-    if (err.code === 'ENOENT') return _empty();
-    throw err;
-  }
+export function createGraph() {
+  return _empty();
 }
 
-// ── Save ──────────────────────────────────────────────────────────────────────
-
-/**
- * Persist the graph to disk.
- * Creates the data/ directory if it does not exist.
- *
- * @param {{ nodes: object, edges: object }} graph
- */
-export async function saveGraph(graph) {
-  await fs.mkdir(path.dirname(GRAPH_PATH), { recursive: true });
-  await fs.writeFile(GRAPH_PATH, JSON.stringify(graph, null, 2), 'utf8');
-}
+// ── Snapshot ──────────────────────────────────────────────────────────────────
 
 /**
  * Write a point-in-time snapshot of the graph to the job output directory.
- * Useful for inspecting which graph state existed at the time of a specific job.
+ * Useful for inspecting the graph state that existed during a specific job.
  *
  * @param {string} outDir - Absolute path to the job output directory
  * @param {{ nodes: object, edges: object }} graph

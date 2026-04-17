@@ -1,15 +1,16 @@
 /**
  * core/graph/graphUpdater.js
  *
- * Mutates the in-memory graph produced by graphStore.loadGraph().
+ * Mutates the in-memory graph produced by graphStore.createGraph().
  * All functions accept the graph as first parameter and mutate it in-place.
- * Call graphStore.saveGraph(graph) after mutations to persist the changes.
+ * The graph is per-request; call graphStore.saveSnapshot() to write a
+ * point-in-time artifact for debugging — no global file is ever written.
  *
- * REVISIT PREVENTION
- * ──────────────────
+ * DUPLICATE PREVENTION (within a single request/crawl run)
+ * ─────────────────────────────────────────────────────────
  * findNode() + node.analyzed lets the caller skip Phase 1 for pages that
- * have already been fully analyzed. This is the primary mechanism preventing
- * duplicate analysis work in the Analyze Worker.
+ * have already been analyzed within the same run.  Because the graph is
+ * per-request, this only prevents revisits inside one crawl, not across runs.
  */
 
 import { createNode, createEdge } from './graphModel.js';

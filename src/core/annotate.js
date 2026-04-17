@@ -7,7 +7,15 @@
  * Uses document-absolute coordinates (rect.x + scrollX, rect.y + scrollY)
  * so boxes appear at the correct position in full-page screenshots.
  * No native image-processing dependencies required.
+ *
+ * Multi-color support: when a node carries `labelColor` and
+ * `functionalCategoryCode` fields (added by classifyNodes()) each box is
+ * rendered in the category color with a label like "[BTN #3]".
+ * Falls back to red "#E53E3E" and index number when these fields are absent.
  */
+
+/** Default annotation color (red) used when no functional category is present. */
+const DEFAULT_COLOR = '#E53E3E';
 
 /**
  * @param {import('playwright').Page} page  - Live Playwright page
@@ -27,13 +35,16 @@ export async function annotateScreenshot(page, nodes, outputPath, screenshotOpts
     return;
   }
 
-  // Prepare a minimal serializable representation
+  // Prepare a minimal serializable representation.
+  // Include per-node color and short code when available (from classifyNodes()).
   const items = nodes.map((n, i) => ({
-    idx: i + 1,
-    x:   n.bbox.x,
-    y:   n.bbox.y,
-    w:   n.bbox.width,
-    h:   n.bbox.height,
+    idx:      i + 1,
+    x:        n.bbox.x,
+    y:        n.bbox.y,
+    w:        n.bbox.width,
+    h:        n.bbox.height,
+    color:    n.labelColor                ?? DEFAULT_COLOR,
+    code:     n.functionalCategoryCode    ?? null,   // null → show only index
   }));
 
   await page.evaluate((items) => {
@@ -49,6 +60,8 @@ export async function annotateScreenshot(page, nodes, outputPath, screenshotOpts
       'pointer-events:none;z-index:2147483647;overflow:visible;';
 
     for (const item of items) {
+      const color = item.color || '#E53E3E';
+
       const box = document.createElement('div');
       box.style.cssText = [
         'position:absolute',
@@ -56,18 +69,21 @@ export async function annotateScreenshot(page, nodes, outputPath, screenshotOpts
         `top:${item.y}px`,
         `width:${item.w}px`,
         `height:${item.h}px`,
-        'border:2px solid rgba(220,40,40,0.85)',
+        `border:2px solid ${color}`,
         'box-sizing:border-box',
         'overflow:visible',
       ].join(';');
 
       const label = document.createElement('div');
-      label.textContent = String(item.idx);
+      // Label text: "[BTN #3]" when code is known, just "3" as fallback
+      label.textContent = item.code
+        ? `[${item.code} #${item.idx}]`
+        : String(item.idx);
       label.style.cssText = [
         'position:absolute',
         'top:-1px',
         'left:-1px',
-        'background:rgba(220,40,40,0.85)',
+        `background:${color}`,
         'color:#fff',
         'font:bold 9px/1.3 monospace',
         'padding:1px 4px',

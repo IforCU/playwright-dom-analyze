@@ -48,15 +48,24 @@ export async function launchBrowser() {
 /**
  * Create a fresh BrowserContext with a 1920×1080 (FHD) viewport.
  * Use one context per page/task so state never bleeds across analyses.
+ *
+ * @param {import('playwright').Browser} browser
+ * @param {{ storageState?: string }} [opts]  - Optional Playwright context options.
+ *   storageState: path to a saved storageState file (cookies + localStorage) for
+ *   authenticated sessions.  When omitted the context starts with a clean slate.
  */
-export async function createFreshContext(browser) {
-  return browser.newContext({
+export async function createFreshContext(browser, opts = {}) {
+  const contextOpts = {
     viewport: { width: 1920, height: 1080 },
     userAgent:
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
       '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
     ignoreHTTPSErrors: true,
-  });
+  };
+  if (opts.storageState) {
+    contextOpts.storageState = opts.storageState;
+  }
+  return browser.newContext(contextOpts);
 }
 
 /**
