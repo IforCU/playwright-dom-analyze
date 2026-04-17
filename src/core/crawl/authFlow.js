@@ -211,3 +211,179 @@ export async function attemptGenericLogin(browser, loginUrl, credentials, storag
     if (ctx) await ctx.close().catch(() => {});
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// attemptLoginOnPage
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Attempt login on an ALREADY-OPEN Playwright page.
+ *
+ * Used by authBootstrap.js so the bootstrap can reuse the page it opened for
+ * auth-detection rather than opening a second context just for login.
+ *
+ * Supports optional `authHints` to override generic heuristic selectors:
+ *   - usernameSelector           : CSS selector for the username / email field
+ *   - passwordSelector           : CSS selector for the password field
+ *   - submitSelector             : CSS selector for the submit / login button
+ *   - postLoginSuccessUrlPattern : substring / pattern to match on success URL
+ *
+ * CREDENTIAL SAFETY: credentials are never logged or written to disk.
+ *
+ * @param {import('playwright').Page} page   - already-navigated Playwright page
+ * @param {{ username: string, password: string }} credentials
+ * @param {{
+ *   usernameSelector?:             string,
+ *   passwordSelector?:             string,
+ *   submitSelector?:               string,
+ *   postLoginSuccessUrlPattern?:   string,
+ * }|null} authHints
+ * @param {string} storageStatePath   - destination for the session state file
+ * @returns {Promise<{
+ *   success:          boolean,
+ *   reason:           string,
+ *   storageStatePath: string|null,
+ *   authHost:         string|null,
+ * }>}
+ */
+export async function attemptLoginOnPage(page, credentials, authHints, storageStatePath) {
+  if (!credentials?.username || !credentials?.password) {
+    return { success: false, reason: 'credentials_incomplete', storageStatePath: null, authHost: null };
+  }
+
+  let authHost;
+  try { authHost = new URL(page.url()).hostname; } catch {
+    return { success: false, reason: 'cannot_determine_auth_host', storageStatePath: null, authHost: null };
+  }
+
+  // ── Build effective selector lists (hints override heuristics) ────────────
+  const effectiveUsernameSels = authHints?.usernameSelector
+    ? [authHints.usernameSelector, ...USERNAME_SELECTORS]
+    : USERNAME_SELECTORS;
+
+  const effectivePasswordSels = authHints?.passwordSelector
+    ? [authHints.passwordSelector, ...PASSWORD_SELECTORS]
+    : PASSWORD_SELECTORS;
+
+  const effectiveSubmitSels   = authHints?.submitSelector
+    ? [authHints.submitSelector, ...SUBMIT_SELECTORS]
+    : SUBMIT_SELECTORS;
+
+  const loginUrl = page.url();
+
+  try {
+    // Small wait so any JS-rendered form has time to appear
+    await page.waitForTimeout(400).catch(() => {});
+
+    // ── Locate username field ──────────────────────────────────────────────────
+    let usernameField = null;
+    for (const sel of effectiveUsernameSels) {
+      try {
+        const el = page.locator(sel).first();
+        if ((await el.count()) > 0 && await el.isVisible()) {
+          usernameField = el;
+          break;
+        }
+      } catch (_) {}
+    }
+
+    if (!usernameField) {
+      console.log(`[authFlow] attemptLoginOnPage: no username field on ${authHost}`);
+      return { success: false, reason: 'no_username_field_found', storageStatePath: null, authHost };
+    }
+
+    // ── Locate password field ──────────────────────────────────────────────────
+    let passwordField = null;
+    for (const sel of effectivePasswordSels) {
+      try {
+        const el = page.locator(sel).first();
+        if ((await el.count()) > 0 && await el.isVisible()) {
+          passwordField = el;
+          break;
+        }
+      } catch (_) {}
+    }
+
+    if (!passwordField) {
+      console.log(`[authFlow] attemptLoginOnPage: no password field on ${authHost}`);
+      return { success: false, reason: 'no_password_field_found', storageStatePath: null, authHost };
+    }
+
+    // ── Fill fields ────────────────────────────────────────────────────────────
+    await usernameField.click();
+    await usernameField.fill(credentials.username);
+    await page.waitForTimeout(150).catch(() => {});
+    await passwordField.click();
+    await passwordField.fill(credentials.password);
+    await page.waitForTimeout(150).catch(() => {});
+
+    // ── Submit ─────────────────────────────────────────────────────────────────
+    let submitted = false;
+    for (const sel of effectiveSubmitSels) {
+      try {
+        const btn = page.locator(sel).first();
+        if ((await btn.count()) > 0 && await btn.isVisible()) {
+          await Promise.all([
+            page.waitForNavigation({ timeout: 20_000, waitUntil: 'load' }).catch(() => {}),
+            btn.click(),
+          ]);
+          submitted = true;
+          break;
+        }
+      } catch (_) {}
+    }
+
+    if (!submitted) {
+      await Promise.all([
+        page.waitForNavigation({ timeout: 12_000, waitUntil: 'load' }).catch(() => {}),
+        passwordField.press('Enter'),
+      ]).catch(() => {});
+    }
+
+    // Extra settle time for post-login redirects / SPA hydration
+    await page.waitForTimeout(1_200).catch(() => {});
+
+    // ── Heuristic success check ────────────────────────────────────────────────
+    const currentUrl = page.url();
+    const urlChanged = currentUrl !== loginUrl;
+
+    // If a success URL pattern was provided, check it first (stronger signal)
+    if (authHints?.postLoginSuccessUrlPattern) {
+      const patternMatches = currentUrl.includes(authHints.postLoginSuccessUrlPattern);
+      if (patternMatches) {
+        await _saveState(page, storageStatePath);
+        console.log(`[authFlow] attemptLoginOnPage: success (hint pattern matched) on ${authHost}`);
+        return { success: true, reason: 'login_succeeded_hint_pattern', storageStatePath, authHost };
+      }
+    }
+
+    const bodyText  = await page.textContent('body').catch(() => '');
+    const lower     = bodyText.toLowerCase();
+    const hasError  = ERROR_KEYWORDS.some((kw) => lower.includes(kw.toLowerCase()));
+    const success   = urlChanged && !hasError;
+
+    if (success) {
+      await _saveState(page, storageStatePath);
+      console.log(`[authFlow] attemptLoginOnPage: success on ${authHost}`);
+      return { success: true, reason: 'login_succeeded', storageStatePath, authHost };
+    }
+
+    const reason = hasError ? 'login_form_showed_error' : 'url_unchanged_after_submit';
+    console.log(`[authFlow] attemptLoginOnPage: failed on ${authHost}: ${reason}`);
+    return { success: false, reason, storageStatePath: null, authHost };
+
+  } catch (err) {
+    console.log(`[authFlow] attemptLoginOnPage error on ${authHost}: ${err.message}`);
+    return { success: false, reason: `error:${err.message}`, storageStatePath: null, authHost };
+  } finally {
+    // Drop local credential reference
+    // eslint-disable-next-line no-param-reassign
+    credentials = null;
+  }
+}
+
+// ── Shared helper: save context storageState to disk ─────────────────────────
+async function _saveState(page, storageStatePath) {
+  await fs.mkdir(path.dirname(storageStatePath), { recursive: true });
+  await page.context().storageState({ path: storageStatePath });
+}

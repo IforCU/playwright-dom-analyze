@@ -54,6 +54,7 @@ import { computePageIdentity }           from '../graph/graphModel.js';
 import { runAnalysis }                   from '../runAnalysis.js';
 import { jobOutputDir, toRelPath }       from '../utils.js';
 import { attemptGenericLogin }           from './authFlow.js';
+import { runPreAuthBootstrap }           from './authBootstrap.js';
 import { writeCrawlGraphArtifacts }      from './graphVisualizer.js';
 
 // ── Defaults ──────────────────────────────────────────────────────────────────
@@ -134,6 +135,13 @@ async function _processFrontierLevel(items, maxConcurrent, fn) {
  *     maxParallelTriggers?: number,
  *   },
  *   credentials:  { username: string, password: string }|null,
+ *   authHints?:   {
+ *     usernameSelector?:           string,
+ *     passwordSelector?:           string,
+ *     submitSelector?:             string,
+ *     loginUrlPattern?:            string,
+ *     postLoginSuccessUrlPattern?: string,
+ *   }|null,
  * }} params
  *
  * @returns {Promise<{
@@ -142,7 +150,7 @@ async function _processFrontierLevel(items, maxConcurrent, fn) {
  *   finalReport:  object,
  * }>}
  */
-export async function runCrawl({ jobId, originalUrl, requestUrl = null, crawlOptions = {}, credentials = null }) {
+export async function runCrawl({ jobId, originalUrl, requestUrl = null, crawlOptions = {}, credentials = null, authHints = null }) {
   const opts       = { ...CRAWL_DEFAULTS, ...crawlOptions };
   const crawlOutDir = jobOutputDir(jobId);
   const pagesDir   = path.join(crawlOutDir, 'pages');
@@ -222,10 +230,75 @@ export async function runCrawl({ jobId, originalUrl, requestUrl = null, crawlOpt
   const browser = await launchBrowser();
   const graph   = createGraph();
 
-  // Per-crawl auth session.  Populated on first successful login.
+  // Per-crawl auth session.  Populated by bootstrap or mid-crawl auth attempt.
   let sessionStorageStatePath = null;
 
+  // ── Pre-crawl auth bootstrap result ─────────────────────────────────────────
+  // Populated below; always an object so finalReport fields are always set.
+  let bootstrapResult = {
+    preAuthRequired:               false,
+    preAuthAttempted:              false,
+    preAuthSucceeded:              false,
+    preAuthFailed:                 false,
+    preAuthReason:                 'skipped_no_credentials',
+    preAuthLoginUrl:               null,
+    preAuthAuthHost:               null,
+    authenticatedSessionEstablished: false,
+    storageStateGenerated:         false,
+    storageStatePath:              null,
+    crawlStartedAfterAuth:         false,
+    stopReason:                    null,
+  };
+
   try {
+    // ─────────────────────────────────────────────────────────────────────────
+    // PRE-CRAWL AUTH BOOTSTRAP
+    // ─────────────────────────────────────────────────────────────────────────
+    //
+    // Before BFS starts, open the starting page once to decide whether login
+    // is required.  If it is and credentials are available, attempt login now.
+    // Only after a successful authenticated session is established (or when no
+    // auth is needed) does the BFS frontier processing begin.
+    //
+    // This prevents the failure mode where the crawler enqueues auth-gated
+    // pages as normal work items and produces analyzed=0 / authAttempted=0.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    if (credentials) {
+      // Always run bootstrap when credentials are provided so we detect
+      // auth-gated starts even before the first BFS page fails.
+      const ssPath = path.join(crawlOutDir, `session-${jobId}.json`);
+      bootstrapResult = await runPreAuthBootstrap({
+        browser,
+        startUrl,
+        rootHost,
+        credentials,
+        authHints,
+        storageStatePath: ssPath,
+      });
+
+      if (bootstrapResult.storageStatePath) {
+        sessionStorageStatePath = bootstrapResult.storageStatePath;
+        authAttempted++;
+        authSucceeded++;
+        console.log('[crawl] pre-auth bootstrap succeeded — BFS will use authenticated contexts');
+      } else if (bootstrapResult.preAuthAttempted && bootstrapResult.preAuthFailed) {
+        authAttempted++;
+        authFailed++;
+        console.log('[crawl] pre-auth bootstrap failed — BFS will proceed unauthenticated');
+      }
+
+      // Hard stop: auth was required but login failed or no credentials given
+      if (bootstrapResult.stopReason === 'auth_required_no_credentials' ||
+          bootstrapResult.stopReason === 'pre_auth_bootstrap_failed'    ||
+          bootstrapResult.stopReason === 'pre_auth_bootstrap_error') {
+        stopReason = bootstrapResult.stopReason;
+        console.log(`[crawl] stopping before BFS — ${stopReason}`);
+        // Skip the BFS entirely; fall through to finally + report
+        currentFrontier = [];
+      }
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // FRONTIER-BASED PARALLEL BFS
     // ─────────────────────────────────────────────────────────────────────────
@@ -464,6 +537,18 @@ export async function runCrawl({ jobId, originalUrl, requestUrl = null, crawlOpt
     crawlOptions:        opts,
     authUsed:            !!sessionStorageStatePath,
     pageTraversalMode:   'frontier_bfs_parallel',
+
+    // ── Pre-crawl auth bootstrap ──────────────────────────────────────────────
+    preAuthRequired:               bootstrapResult.preAuthRequired,
+    preAuthAttempted:              bootstrapResult.preAuthAttempted,
+    preAuthSucceeded:              bootstrapResult.preAuthSucceeded,
+    preAuthFailed:                 bootstrapResult.preAuthFailed,
+    preAuthReason:                 bootstrapResult.preAuthReason,
+    preAuthLoginUrl:               bootstrapResult.preAuthLoginUrl,
+    preAuthAuthHost:               bootstrapResult.preAuthAuthHost,
+    authenticatedSessionEstablished: bootstrapResult.authenticatedSessionEstablished,
+    storageStateGenerated:         bootstrapResult.storageStateGenerated,
+    crawlStartedAfterAuth:         bootstrapResult.crawlStartedAfterAuth,
 
     crawlSummary: {
       totalPagesAnalyzed:    pageCountAnalyzed,

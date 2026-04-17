@@ -546,18 +546,21 @@ export function generateMermaid(graphData) {
 // ── HTML generation ───────────────────────────────────────────────────────────
 
 /**
- * Generate a self-contained HTML file with an interactive vis-network graph.
+ * Generate a self-contained HTML file with an interactive D3.js force graph.
  *
  * Features:
- * - Hierarchical LR layout (BFS depth = horizontal axis)
- * - Node colors / shapes by status
- * - Edge colors / styles by type
- * - Sidebar with stats + legend
- * - Click node → detail panel
- * - Double-click node → open URL in new tab
- * - Toolbar: fit, force layout, hierarchical layout, toggle labels
+ * - D3 v7 force simulation (reliable zoom/pan/drag in any browser)
+ * - BFS depth → weak forceX column layout (depth 0 left, deeper pages right)
+ * - Node colors / sizes by crawl status
+ * - Edge colors / dash patterns by edge category; SVG arrow markers
+ * - Boilerplate edges hidden by default (auto-shown when no meaningful edges)
+ * - Hover tooltip; click detail panel; double-click opens URL
+ * - Sidebar: stats + legend + filter controls
+ * - Node drag (click to pin, click again to unpin)
+ * - Hover highlights connected nodes/edges
+ * - Window resize handler
  *
- * The vis-network library is loaded from CDN (no build step required).
+ * Works as a local file:// HTML (D3 loaded from CDN).
  *
  * @param {object} graphData  - output of buildGraphData()
  * @returns {string}  complete HTML document
@@ -565,90 +568,77 @@ export function generateMermaid(graphData) {
 export function generateHtml(graphData) {
   const { nodes, edges, stats, jobId, originalUrl } = graphData;
 
-  // Build vis-network node objects
-  const visNodes = nodes.map((n) => {
-    const fill   = STATUS_FILL[n.status]       ?? STATUS_FILL.unknown;
-    const border = STATUS_BORDER[n.status]     ?? STATUS_BORDER.unknown;
-    const fontC  = STATUS_FONT_COLOR[n.status] ?? '#fff';
-    const shape  = STATUS_SHAPE[n.status]      ?? 'box';
+  // ── Build D3-ready node / edge data ────────────────────────────────────────
+  const nodesSrc = nodes.map((n) => ({
+    id:               n.id,
+    label:            n.label,
+    depthLabel:       n.depthLabel,
+    depth:            n.depth >= 0 ? n.depth : 0,
+    status:           n.status,
+    tooltip:          n.tooltip,
+    representativeUrl: n.representativeUrl ?? null,
+    hostname:         n.hostname ?? '',
+    normalizedPath:   n.normalizedPath ?? '/',
+    color:            STATUS_FILL[n.status]   ?? STATUS_FILL.unknown,
+    strokeColor:      STATUS_BORDER[n.status] ?? STATUS_BORDER.unknown,
+    // Visual radius per status
+    radius: n.status === 'start'      ? 16
+          : n.status === 'auth_gated' ? 12
+          : n.status === 'analyzed'   ? 11
+          : n.status === 'queued'     ? 9
+          : n.status === 'failed'     ? 11
+          : 8,
+  }));
 
-    return {
-      id:             n.id,
-      label:          `${n.label}\n[${n.depthLabel}]`,
-      title:          n.tooltip,             // HTML tooltip
-      representativeUrl: n.representativeUrl,
-      color: {
-        background: fill,
-        border,
-        hover:      { background: fill, border },
-        highlight:  { background: fill, border },
-      },
-      font:           { color: fontC, size: 12, face: 'monospace' },
-      shape,
-      level:          n.depth >= 0 ? n.depth : 999,
-      borderWidth:    n.status === 'start' ? 4 : 2,
-      shadow:         n.status === 'start' || n.status === 'analyzed',
-      mass:           1,
-    };
-  });
+  // D3 forceLink uses source/target (not from/to)
+  const edgesSrc = edges.map((e) => ({
+    id:               e.id,
+    source:           e.from,
+    target:           e.to,
+    label:            e.label,
+    edgeCategory:     e.edgeCategory,
+    isBoilerplateNav: e.isBoilerplateNav,
+    isOutOfScopeRef:  e.edgeCategory === 'out_of_scope_reference',
+  }));
 
-  // Build vis-network edge objects.
-  // edgeCategory drives color and visibility.  Boilerplate edges start hidden.
-  const visEdges = edges.map((e, i) => {
-    const color  = EDGE_COLOR[e.edgeCategory] ?? EDGE_COLOR.content_link;
-    const dashes = e.edgeCategory === 'auth_gate' || e.edgeCategory === 'out_of_scope_reference';
-    const width  = e.edgeCategory === 'trigger_navigation' ? 2.5
-      : e.edgeCategory === 'boilerplate_navigation'        ? 0.6
-      : 1;
-    const opacity = e.isBoilerplateNav ? 0.25 : 0.85;
-
-    return {
-      id:              e.id ?? `e${i}`,
-      from:            e.from,
-      to:              e.to,
-      label:           e.label,
-      arrows:          'to',
-      color:           { color, opacity },
-      dashes,
-      width,
-      hidden:          e.isBoilerplateNav || e.edgeCategory === 'out_of_scope_reference',
-      isBoilerplateNav: e.isBoilerplateNav,
-      isOutOfScopeRef:  e.edgeCategory === 'out_of_scope_reference',
-      edgeCategory:    e.edgeCategory,
-      font:            { size: 9, color: '#aaa', align: 'middle', strokeWidth: 0 },
-      smooth:          { enabled: true, type: 'curvedCW', roundness: 0.15 },
-    };
-  });
-
-  // Inline JSON (escape </script> to prevent HTML parsing issue)
   const safeJson = (obj) =>
     JSON.stringify(obj, null, 0).replace(/<\/script>/gi, '<\\/script>');
 
-  const nodesJson = safeJson(visNodes);
-  const edgesJson = safeJson(visEdges);
+  const nodesSrcJson = safeJson(nodesSrc);
+  const edgesSrcJson = safeJson(edgesSrc);
 
-  // Legend rows
+  const meaningfulCount   = edges.filter(e => !e.isBoilerplateNav && e.edgeCategory !== 'out_of_scope_reference').length;
+  const boilerplateCount  = edges.filter(e => e.isBoilerplateNav).length;
+  const outOfScopeCount   = edges.filter(e => e.edgeCategory === 'out_of_scope_reference').length;
+  // When no meaningful edges, auto-show boilerplate so the graph isn't empty
+  const initShowBp = meaningfulCount === 0 && boilerplateCount > 0 ? 'true' : 'false';
+
+  // ── Legend / stat rows ──────────────────────────────────────────────────────
   const statusLegend = [
-    { status: 'start',        shape: 'ellipse', label: 'Start page (seed URL)' },
-    { status: 'analyzed',     shape: 'box',     label: 'Analyzed (crawled)' },
-    { status: 'queued',       shape: 'box',     label: 'Queued / not visited' },
-    { status: 'auth_gated',   shape: 'diamond', label: 'Auth gateway / login page' },
-    { status: 'failed',       shape: 'box',     label: 'Failed / error' },
-    { status: 'out_of_scope', shape: 'box',     label: 'Out-of-scope / stopped' },
-    { status: 'duplicate',    shape: 'box',     label: 'Duplicate (prior run)' },
-  ].map(({ status, shape, label }) => {
-    const fill   = STATUS_FILL[status];
-    const border = STATUS_BORDER[status];
-    const dotStyle = shape === 'ellipse'
-      ? `border-radius:50%;border:2px solid ${border}`
-      : shape === 'diamond'
-      ? `transform:rotate(45deg);border:2px solid ${border}`
-      : `border-radius:3px;border:2px solid ${border}`;
+    { status: 'start',        label: 'Start page (seed URL)',       shape: 'circle' },
+    { status: 'analyzed',     label: 'Analyzed (crawled)',           shape: 'box'    },
+    { status: 'queued',       label: 'Queued / not visited',         shape: 'box'    },
+    { status: 'auth_gated',   label: 'Auth gateway / login page',    shape: 'box'    },
+    { status: 'failed',       label: 'Failed / error',               shape: 'box'    },
+    { status: 'out_of_scope', label: 'Out-of-scope / stopped',       shape: 'box'    },
+    { status: 'duplicate',    label: 'Duplicate (prior run)',         shape: 'box'    },
+  ].map(({ status, label }) => {
+    const fill   = STATUS_FILL[status]   ?? STATUS_FILL.unknown;
+    const border = STATUS_BORDER[status] ?? STATUS_BORDER.unknown;
     return `<div class="legend-item">
-      <div class="legend-dot" style="background:${fill};${dotStyle}"></div>
+      <div class="legend-dot" style="background:${fill};border:2px solid ${border};border-radius:${status==='start'?'50%':'3px'}"></div>
       <span>${label}</span>
     </div>`;
   }).join('\n');
+
+  const edgeLegend = `
+    <div class="edge-legend-item"><div class="edge-line" style="background:#74C0FC"></div><span>Content link</span></div>
+    <div class="edge-legend-item"><div class="edge-line thick" style="background:#2ecc71"></div><span>Trigger navigation</span></div>
+    <div class="edge-legend-item"><div class="edge-line" style="background:#a29bfe"></div><span>Form navigation</span></div>
+    <div class="edge-legend-item"><div class="edge-line dashed-auth"></div><span>Auth gate</span></div>
+    <div class="edge-legend-item"><div class="edge-line dashed-oos"></div><span style="color:#666">Out-of-scope ref <i>(hidden)</i></span></div>
+    <div class="edge-legend-item"><div class="edge-line" style="background:#4a4a7c;opacity:0.5"></div><span style="color:#666">Boilerplate nav <i>(dim)</i></span></div>
+  `;
 
   const statRows = [
     ['Total nodes',         stats.totalNodes,           ''],
@@ -658,9 +648,9 @@ export function generateHtml(graphData) {
     ['Failed',              stats.failedNodes,          'color:#e74c3c'],
     ['Out-of-scope',        stats.outOfScopeNodes,      'color:#95a5a6'],
     ['Total edges',         stats.totalEdges,           ''],
-    ['  Meaningful',        stats.meaningfulEdgeCount - stats.outOfScopeRefEdges, 'color:#74C0FC'],
-    ['  Out-of-scope refs', stats.outOfScopeRefEdges,   'color:#636e72;font-style:italic'],
-    ['  Boilerplate (nav)', stats.boilerplateEdgeCount, 'color:#555577;font-style:italic'],
+    ['  Meaningful',        meaningfulCount - outOfScopeCount, 'color:#74C0FC'],
+    ['  Out-of-scope refs', outOfScopeCount,            'color:#636e72;font-style:italic'],
+    ['  Boilerplate (nav)', boilerplateCount,           'color:#555577;font-style:italic'],
     ['  Trigger nav',       stats.triggerEdges,         'color:#2ecc71'],
     ['  Form nav',          stats.formEdges,            'color:#a29bfe'],
     ['  Auth gate',         stats.authGatedEdges,       'color:#FFB347'],
@@ -676,18 +666,18 @@ export function generateHtml(graphData) {
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
 <title>Crawl Graph — ${escHtml(jobId)}</title>
 <style>
-* { box-sizing: border-box; margin: 0; padding: 0; }
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { width: 100%; height: 100%; overflow: hidden; }
 body {
   background: #0f0f1a;
   color: #e0e0e0;
   font-family: 'Segoe UI', system-ui, sans-serif;
-  height: 100vh;
-  overflow: hidden;
 }
 #app { display: flex; flex-direction: column; height: 100vh; }
 
+/* ── Header ── */
 #header {
-  padding: 8px 16px;
+  padding: 7px 14px;
   background: #1a1a2e;
   border-bottom: 1px solid #2d2d4e;
   display: flex;
@@ -695,31 +685,101 @@ body {
   gap: 12px;
   flex-shrink: 0;
 }
-#header h1 { font-size: 14px; font-weight: 700; color: #FF6B9D; white-space: nowrap; }
-#header .sub {
+#header h1 { font-size: 13px; font-weight: 700; color: #FF6B9D; white-space: nowrap; }
+#header .sub { font-size: 11px; color: #74C0FC; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ── Main area ── */
+#main { display: flex; flex: 1; min-height: 0; overflow: hidden; }
+
+/* ── Graph container ── */
+#graph-wrap { flex: 1; position: relative; min-width: 0; min-height: 0; background: #0f0f1a; }
+#graph-svg  { position: absolute; inset: 0; width: 100%; height: 100%; cursor: grab; }
+#graph-svg:active { cursor: grabbing; }
+
+/* ── SVG styles (used by D3-rendered elements) ── */
+.link { fill: none; }
+.node-circle { transition: opacity 0.15s; }
+.node-label  {
+  font-family: 'Cascadia Code', 'Fira Mono', monospace;
+  pointer-events: none;
+  user-select: none;
+  paint-order: stroke fill;
+  stroke: #0f0f1a;
+  stroke-width: 3px;
+  stroke-linejoin: round;
+}
+.node-g { cursor: pointer; }
+.node-g.pinned .node-circle { stroke-dasharray: 4 2; }
+
+/* ── Tooltip ── */
+#tooltip {
+  position: fixed;
+  display: none;
+  background: rgba(10, 10, 28, 0.97);
+  border: 1px solid #3d3d6e;
+  border-radius: 7px;
+  padding: 9px 13px;
   font-size: 11px;
-  color: #74C0FC;
-  opacity: 0.9;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.65;
+  max-width: 320px;
+  max-height: 240px;
+  overflow-y: auto;
+  pointer-events: none;
+  z-index: 100;
+  word-break: break-word;
+}
+#tooltip b     { font-weight: 700; }
+#tooltip i     { color: #999; }
+#tooltip small { font-size: 10px; }
+
+/* ── Detail panel ── */
+#detail-panel {
+  position: absolute;
+  bottom: 12px;
+  left: 12px;
+  background: rgba(10, 10, 28, 0.97);
+  border: 1px solid #3d3d6e;
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 11px;
+  line-height: 1.7;
+  max-width: 340px;
+  max-height: 260px;
+  overflow-y: auto;
+  display: none;
+  z-index: 20;
+  pointer-events: auto;
+}
+#detail-panel b     { font-weight: 700; }
+#detail-panel i     { color: #999; }
+#detail-panel small { font-size: 10px; word-break: break-all; }
+#detail-close { float: right; cursor: pointer; font-size: 13px; opacity: 0.6; margin-left: 8px; }
+#detail-close:hover { opacity: 1; }
+
+/* ── Hint text ── */
+#hint {
+  position: absolute;
+  bottom: 12px;
+  right: 12px;
+  font-size: 10px;
+  color: #444;
+  pointer-events: none;
+  line-height: 1.7;
+  text-align: right;
 }
 
-#main { display: flex; flex: 1; overflow: hidden; }
-
-#net-wrap { flex: 1; position: relative; overflow: hidden; }
-#network { width: 100%; height: 100%; display: block; }
-
+/* ── Sidebar ── */
 #sidebar {
-  width: 230px;
+  width: 240px;
   background: #1a1a2e;
   border-left: 1px solid #2d2d4e;
   overflow-y: auto;
   padding: 10px 12px;
   flex-shrink: 0;
+  font-size: 11px;
 }
 .sb-title {
-  font-size: 11px;
+  font-size: 10px;
   color: #FF6B9D;
   text-transform: uppercase;
   letter-spacing: 1px;
@@ -727,14 +787,14 @@ body {
   font-weight: 700;
 }
 .sb-title:first-child { margin-top: 0; }
+.sb-hr { border: none; border-top: 1px solid #2d2d4e; margin: 8px 0; }
 
 .stat-row {
   display: flex;
   justify-content: space-between;
-  font-size: 11px;
-  margin-bottom: 4px;
+  margin-bottom: 3px;
   padding-bottom: 3px;
-  border-bottom: 1px solid #222238;
+  border-bottom: 1px solid #1e1e34;
 }
 .stat-val { font-weight: 700; }
 
@@ -742,47 +802,32 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 7px;
-  font-size: 11px;
+  margin-bottom: 6px;
 }
-.legend-dot {
-  width: 14px;
-  height: 14px;
-  flex-shrink: 0;
-  border-radius: 3px;
-}
-.sb-hr { border: none; border-top: 1px solid #2d2d4e; margin: 8px 0; }
+.legend-dot { width: 13px; height: 13px; flex-shrink: 0; }
 
-.edge-legend-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 7px;
-  font-size: 11px;
-}
-.edge-line {
-  width: 28px;
-  height: 2px;
-  flex-shrink: 0;
-}
+.edge-legend-item { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.edge-line { width: 28px; height: 2px; flex-shrink: 0; }
 .edge-line.thick { height: 3px; }
-.edge-line.dashed {
-  background: repeating-linear-gradient(
-    to right,
-    #FFB347 0, #FFB347 5px,
-    transparent 5px, transparent 9px
-  );
+.edge-line.dashed-auth {
+  background: repeating-linear-gradient(to right, #FFB347 0, #FFB347 5px, transparent 5px, transparent 9px);
+  height: 2px;
+}
+.edge-line.dashed-oos {
+  background: repeating-linear-gradient(to right, #636e72 0, #636e72 5px, transparent 5px, transparent 9px);
   height: 2px;
 }
 
+/* ── Controls bar ── */
 #controls {
-  padding: 7px 12px;
+  padding: 6px 12px;
   background: #1a1a2e;
   border-top: 1px solid #2d2d4e;
   display: flex;
-  gap: 7px;
+  gap: 6px;
   align-items: center;
   flex-shrink: 0;
+  flex-wrap: wrap;
 }
 button {
   background: #2d2d4e;
@@ -794,36 +839,7 @@ button {
   font-size: 11px;
 }
 button:hover { background: #3d3d6e; }
-
-#detail-panel {
-  position: absolute;
-  bottom: 10px;
-  left: 10px;
-  background: rgba(15, 15, 30, 0.96);
-  border: 1px solid #3d3d6e;
-  border-radius: 8px;
-  padding: 10px 14px;
-  font-size: 11px;
-  max-width: 320px;
-  max-height: 260px;
-  overflow-y: auto;
-  display: none;
-  line-height: 1.6;
-  pointer-events: none;
-  z-index: 10;
-}
-#detail-panel b { font-weight: 700; }
-#detail-panel i  { color: #888; }
-#detail-panel small { font-size: 10px; word-break: break-all; }
-
-#hint {
-  position: absolute;
-  bottom: 10px;
-  right: 10px;
-  font-size: 10px;
-  color: #555;
-  pointer-events: none;
-}
+#edge-count-label { font-size: 10px; color: #555; margin-left: auto; }
 </style>
 </head>
 <body>
@@ -834,10 +850,14 @@ button:hover { background: #3d3d6e; }
   </div>
 
   <div id="main">
-    <div id="net-wrap">
-      <div id="network"></div>
-      <div id="detail-panel"></div>
-      <div id="hint">클릭: 상세정보 &nbsp;·&nbsp; 더블클릭: URL 열기 &nbsp;·&nbsp; 드래그: 회전 &nbsp;·&nbsp; 스크롤: 줌</div>
+    <div id="graph-wrap">
+      <svg id="graph-svg"></svg>
+      <div id="tooltip"></div>
+      <div id="detail-panel">
+        <span id="detail-close" title="닫기" onclick="document.getElementById('detail-panel').style.display='none'">✕</span>
+        <div id="detail-content"></div>
+      </div>
+      <div id="hint">드래그: 이동&nbsp;·&nbsp;스크롤: 줌<br/>클릭: 상세정보&nbsp;·&nbsp;더블클릭: URL 열기<br/>노드 드래그: 위치 고정</div>
     </div>
 
     <div id="sidebar">
@@ -850,212 +870,393 @@ button:hover { background: #3d3d6e; }
 
       <hr class="sb-hr"/>
       <div class="sb-title">Edge Legend</div>
-      <div class="edge-legend-item">
-        <div class="edge-line" style="background:#74C0FC"></div>
-        <span>Content link</span>
-      </div>
-      <div class="edge-legend-item">
-        <div class="edge-line thick" style="background:#2ecc71"></div>
-        <span>Trigger navigation</span>
-      </div>
-      <div class="edge-legend-item">
-        <div class="edge-line" style="background:#a29bfe"></div>
-        <span>Form navigation</span>
-      </div>
-      <div class="edge-legend-item">
-        <div class="edge-line dashed"></div>
-        <span>Auth gate</span>
-      </div>
-      <div class="edge-legend-item">
-        <div class="edge-line" style="background:#3a3a5c;opacity:0.5"></div>
-        <span style="color:#666">Boilerplate nav <i>(hidden)</i></span>
-      </div>
-      <div class="edge-legend-item">
-        <div class="edge-line" style="background:#636e72;opacity:0.6"></div>
-        <span style="color:#666">Out-of-scope ref <i>(hidden)</i></span>
-      </div>
+      ${edgeLegend}
 
       <hr class="sb-hr"/>
       <div class="sb-title">레이아웃</div>
       <p style="font-size:10px;color:#666;line-height:1.5;margin-top:4px">
-        3D 포스 레이아웃.<br/>
-        드래그: 회전 / 우클릭: 패닝<br/>
-        스크롤: 줌 / 클릭: 상세
+        D3 포스 레이아웃<br/>
+        BFS 깊이 → 좌우 배치<br/>
+        줌·패닝·드래그 지원
       </p>
     </div>
   </div>
 
   <div id="controls">
-    <button onclick="resetCamera()">⊞ 카메라 리셋</button>
+    <button onclick="resetZoom()">⊞ 뷰 리셋</button>
     <button onclick="toggleLabels()">🏷 라벨 토글</button>
-    <button id="btn-boilerplate" onclick="toggleBoilerplateEdges()" title="Global nav / header / footer / repeated menu links are classified as boilerplate and hidden by default">🔕 Show Boilerplate</button>
-    <button id="btn-oos" onclick="toggleOutOfScopeEdges()" title="Edges to out-of-scope pages (external, policy, redirected) are hidden by default to reduce clutter">🔗 Show OOS Refs</button>
-    <span id="edge-count-label" style="font-size:10px;color:#555;margin-left:auto">${nodes.length} nodes &nbsp;·&nbsp; ${edges.filter(e=>!e.isBoilerplateNav && e.edgeCategory!=='out_of_scope_reference').length} meaningful edges (${edges.filter(e=>e.isBoilerplateNav).length} bp + ${edges.filter(e=>e.edgeCategory==='out_of_scope_reference').length} oos hidden)</span>
+    <button id="btn-bp"  onclick="toggleBP()"  title="Boilerplate = global nav/header/footer links (heuristic)">🔕 Show Boilerplate</button>
+    <button id="btn-oos" onclick="toggleOOS()" title="Edges to out-of-scope pages — hidden by default">🔗 Show OOS Refs</button>
+    <span id="edge-count-label"></span>
   </div>
 </div>
 
-<script src="https://unpkg.com/three@0.167.1/build/three.min.js"></script>
-<script src="https://unpkg.com/three-spritetext@1.9.0/dist/three-spritetext.min.js"></script>
-<script src="https://unpkg.com/3d-force-graph@1.73.3/dist/3d-force-graph.min.js"></script>
+<script src="https://d3js.org/d3.v7.min.js"></script>
 <script>
-// ── Data ─────────────────────────────────────────────────────────────────────
-const NODES_SRC = ${nodesJson};
-const EDGES_SRC = ${edgesJson};
+// ── Graph data ────────────────────────────────────────────────────────────────
+// nodes: id, label, depth, status, color, strokeColor, radius, tooltip, representativeUrl
+const NODES_SRC = ${nodesSrcJson};
+// edges: id, source, target, edgeCategory, isBoilerplateNav, isOutOfScopeRef
+const EDGES_SRC = ${edgesSrcJson};
 
-// Decode Korean/CJK percent-encoded paths
-function _decodePath(s) { try { return decodeURIComponent(s); } catch { return s; } }
-NODES_SRC.forEach(n => {
-  if (n.label) n.label = _decodePath(n.label);
-  if (n.title) n.title = n.title.replace(/(%[0-9A-Fa-f]{2})+/g, m => _decodePath(m));
-});
+// Decode any percent-encoded labels / tooltips (Korean, CJK, etc.)
+(function _decode() {
+  function _d(s) { try { return decodeURIComponent(s); } catch (_) { return s; } }
+  NODES_SRC.forEach(n => {
+    if (n.label)          n.label          = _d(n.label);
+    if (n.normalizedPath) n.normalizedPath = _d(n.normalizedPath);
+    if (n.tooltip)        n.tooltip        = n.tooltip.replace(/(%[0-9A-Fa-f]{2})+/g, _d);
+  });
+})();
 
-const MEANINGFUL_EDGES   = EDGES_SRC.filter(e => !e.isBoilerplateNav && !e.isOutOfScopeRef);
-const BOILERPLATE_EDGES  = EDGES_SRC.filter(e =>  e.isBoilerplateNav);
-const OUT_OF_SCOPE_EDGES = EDGES_SRC.filter(e =>  e.isOutOfScopeRef);
+// ── Edge classification buckets ───────────────────────────────────────────────
+const MEANINGFUL_EDGES  = EDGES_SRC.filter(e => !e.isBoilerplateNav && !e.isOutOfScopeRef);
+const BOILERPLATE_EDGES = EDGES_SRC.filter(e =>  e.isBoilerplateNav);
+const OOS_EDGES         = EDGES_SRC.filter(e =>  e.isOutOfScopeRef);
 
 // ── State ─────────────────────────────────────────────────────────────────────
-let showBoilerplate    = false;
-let showOutOfScopeRefs = false;
-let labelsOn           = true;
+let showBP   = ${initShowBp};  // auto-true when no meaningful edges exist
+let showOOS  = false;
+let labelsOn = true;
 
-function _activeEdges() {
-  let e = [...MEANINGFUL_EDGES];
-  if (showBoilerplate)    e = e.concat(BOILERPLATE_EDGES);
-  if (showOutOfScopeRefs) e = e.concat(OUT_OF_SCOPE_EDGES);
-  return e;
+// ── Edge visual styles ────────────────────────────────────────────────────────
+const EDGE_STYLE = {
+  content_link:           { color: '#74C0FC', width: 1.5, dash: null,    opacity: 0.75 },
+  trigger_navigation:     { color: '#2ecc71', width: 3.0, dash: null,    opacity: 0.85 },
+  form_navigation:        { color: '#a29bfe', width: 1.5, dash: null,    opacity: 0.75 },
+  auth_gate:              { color: '#FFB347', width: 2.0, dash: '6,4',   opacity: 0.85 },
+  out_of_scope_reference: { color: '#636e72', width: 1.0, dash: '5,4',   opacity: 0.55 },
+  boilerplate_navigation: { color: '#4a4a7c', width: 0.8, dash: null,    opacity: 0.30 },
+  normal_discovery:       { color: '#74C0FC', width: 1.5, dash: null,    opacity: 0.75 },
+  navigation_trigger:     { color: '#2ecc71', width: 3.0, dash: null,    opacity: 0.85 },
+};
+function edgeStyle(cat) { return EDGE_STYLE[cat] || EDGE_STYLE.content_link; }
+
+// ── SVG + Zoom setup ──────────────────────────────────────────────────────────
+const svgEl  = document.getElementById('graph-svg');
+const svg    = d3.select(svgEl);
+const gMain  = svg.append('g').attr('id', 'g-main');
+const gLinks = gMain.append('g').attr('id', 'g-links');
+const gNodes = gMain.append('g').attr('id', 'g-nodes');
+
+const zoomBehavior = d3.zoom()
+  .scaleExtent([0.03, 12])
+  .on('zoom', ev => gMain.attr('transform', ev.transform));
+svg.call(zoomBehavior);
+
+// ── Arrow marker defs ─────────────────────────────────────────────────────────
+const defs = svg.append('defs');
+const ARROW_CATS = Object.keys(EDGE_STYLE);
+ARROW_CATS.forEach(cat => {
+  const color = EDGE_STYLE[cat].color;
+  defs.append('marker')
+    .attr('id',          \`arrow-\${cat}\`)
+    .attr('viewBox',     '0 -5 10 10')
+    .attr('refX',        10)
+    .attr('refY',        0)
+    .attr('markerWidth', 6)
+    .attr('markerHeight',6)
+    .attr('orient',      'auto')
+    .append('path')
+      .attr('d',    'M0,-5L10,0L0,5')
+      .attr('fill', color);
+});
+
+// ── Working node objects (D3 simulation mutates x, y, vx, vy) ────────────────
+const simNodes = NODES_SRC.map(d => ({ ...d }));
+const nodeById = new Map(simNodes.map(n => [n.id, n]));
+
+// ── Force simulation ──────────────────────────────────────────────────────────
+const DEPTH_SPACING = 230;  // px between BFS depth columns
+const LEFT_PAD      = 180;  // px from left edge for depth-0 nodes
+
+function svgW() { return svgEl.clientWidth  || window.innerWidth  || 800; }
+function svgH() { return svgEl.clientHeight || window.innerHeight || 600; }
+
+const simulation = d3.forceSimulation(simNodes)
+  .force('link',      d3.forceLink([]).id(d => d.id).distance(110).strength(0.4))
+  .force('charge',    d3.forceManyBody().strength(-480).distanceMax(700))
+  .force('center',    d3.forceCenter(svgW() / 2, svgH() / 2))
+  .force('collision', d3.forceCollide().radius(d => (d.radius || 10) + 20))
+  // Weak X force groups nodes by BFS depth (depth 0 far left)
+  .force('x_depth',   d3.forceX(d => LEFT_PAD + (d.depth || 0) * DEPTH_SPACING).strength(0.10))
+  // Weak Y force keeps nodes vertically centered
+  .force('y_center',  d3.forceY(svgH() / 2).strength(0.04))
+  .on('tick', ticked);
+
+// ── Tooltip ───────────────────────────────────────────────────────────────────
+const tooltip = d3.select('#tooltip');
+
+function showTip(ev, html) {
+  tooltip.html(html).style('display', 'block')
+    .style('left', (ev.clientX + 16) + 'px')
+    .style('top',  (ev.clientY - 12) + 'px');
+}
+function moveTip(ev) {
+  tooltip.style('left', (ev.clientX + 16) + 'px').style('top', (ev.clientY - 12) + 'px');
+}
+function hideTip() { tooltip.style('display', 'none'); }
+
+// ── Detail panel ──────────────────────────────────────────────────────────────
+function showDetail(d) {
+  document.getElementById('detail-content').innerHTML = d.tooltip || \`<b>\${d.label}</b>\`;
+  document.getElementById('detail-panel').style.display = 'block';
 }
 
-// Color lookup by node id / edge id
-const nodeColorMap = {};
-NODES_SRC.forEach(n => { nodeColorMap[n.id] = (n.color?.background) ?? '#74C0FC'; });
-const edgeColorMap = {};
-EDGES_SRC.forEach(e => { edgeColorMap[e.id] = (e.color?.color) ?? '#74C0FC'; });
+// ── Drag behavior ─────────────────────────────────────────────────────────────
+const drag = d3.drag()
+  .on('start', (ev, d) => {
+    if (!ev.active) simulation.alphaTarget(0.3).restart();
+    d.fx = d.x;
+    d.fy = d.y;
+    hideTip();
+  })
+  .on('drag', (ev, d) => {
+    d.fx = ev.x;
+    d.fy = ev.y;
+  })
+  .on('end', (ev, d) => {
+    if (!ev.active) simulation.alphaTarget(0);
+    // Node stays pinned (fx/fy set). Click the node to unpin it.
+  });
 
-// ── 3D graph ──────────────────────────────────────────────────────────────────
-const container = document.getElementById('network');
-
-function _buildGraphData() {
-  return {
-    nodes: NODES_SRC.map(n => ({
-      id:               n.id,
-      label:            labelsOn ? (n.label || '') : '',
-      tooltip:          n.title ?? '',
-      representativeUrl: n.representativeUrl,
-      color:            nodeColorMap[n.id],
-      status:           n.status,
-      level:            n.level ?? 0,
-    })),
-    links: _activeEdges().map(e => ({
-      id:       e.id,
-      source:   e.from,
-      target:   e.to,
-      label:    e.label ?? '',
-      color:    edgeColorMap[e.id] ?? '#74C0FC',
-      width:    e.width ?? 1,
-      dashes:   e.dashes ?? false,
-      category: e.edgeCategory ?? '',
-    })),
-  };
+// ── Active link builder ───────────────────────────────────────────────────────
+function buildLinks() {
+  let src = [...MEANINGFUL_EDGES];
+  if (showBP)  src = src.concat(BOILERPLATE_EDGES);
+  if (showOOS) src = src.concat(OOS_EDGES);
+  // Return fresh copies so D3 forceLink can mutate source/target to object refs
+  return src.map(e => ({ ...e }));
 }
 
-const Graph = ForceGraph3D({ extraRenderers: [] })(container)
-  .backgroundColor('#0f0f1a')
-  .showNavInfo(false)
-  .nodeLabel(n => n.tooltip || n.label)
-  .nodeColor(n => n.color)
-  .nodeRelSize(5)
-  .nodeVal(n => n.status === 'start' ? 4 : n.status === 'analyzed' ? 2.5 : 1)
-  .nodeThreeObjectExtend(true)
-  .nodeThreeObject(n => {
-    if (!labelsOn || !n.label) return null;
-    const sprite = new SpriteText(n.label);
-    sprite.color = '#ffffff';
-    sprite.textHeight = 3.5;
-    sprite.backgroundColor = 'rgba(10,10,25,0.65)';
-    sprite.padding = 1.5;
-    return sprite;
-  })
-  .linkColor(l => l.color)
-  .linkWidth(l => l.width)
-  .linkOpacity(0.75)
-  .linkDirectionalArrowLength(5)
-  .linkDirectionalArrowRelPos(1)
-  .linkDirectionalParticles(l => l.category === 'trigger_navigation' ? 3 : 0)
-  .linkDirectionalParticleWidth(2)
-  .linkDirectionalParticleSpeed(0.004)
-  .onNodeClick(n => {
-    const panel = document.getElementById('detail-panel');
-    panel.innerHTML = n.tooltip || n.label;
-    panel.style.display = 'block';
-  })
-  .onNodeDblClick(n => {
-    if (n.representativeUrl) window.open(n.representativeUrl, '_blank');
-  })
-  .onBackgroundClick(() => {
-    document.getElementById('detail-panel').style.display = 'none';
-  })
-  .graphData(_buildGraphData());
+// ── D3 selection references (updated by render) ───────────────────────────────
+let linkSel = gLinks.selectAll('.link');
+let nodeSel = gNodes.selectAll('.node-g');
 
-// Zoom to fit after physics warm-up
-setTimeout(() => Graph.zoomToFit(600, 80), 1800);
+// ── Render function ───────────────────────────────────────────────────────────
+function render(activeLinks) {
+  // ── Links ──
+  linkSel = gLinks.selectAll('.link')
+    .data(activeLinks, d => d.id)
+    .join(
+      enter => enter.append('line')
+        .attr('class', 'link')
+        .style('pointer-events', 'visibleStroke')
+        .on('mouseenter', (ev, d) => {
+          const s = edgeStyle(d.edgeCategory);
+          const lines = [
+            \`<b>Edge:</b> \${d.edgeCategory || 'link'}\`,
+            d.label ? \`<b>Label:</b> \${d.label}\` : null,
+            d.isBoilerplateNav ? '<i style="color:#888">boilerplate (heuristic: repeated global nav)</i>' : null,
+            d.isOutOfScopeRef  ? '<i style="color:#888">out-of-scope reference</i>' : null,
+          ].filter(Boolean).join('<br/>');
+          showTip(ev, lines);
+        })
+        .on('mousemove', moveTip)
+        .on('mouseleave', hideTip),
+      update => update,
+      exit   => exit.remove()
+    );
+
+  // Apply styles to all active links
+  linkSel
+    .attr('stroke',           d => edgeStyle(d.edgeCategory).color)
+    .attr('stroke-width',     d => edgeStyle(d.edgeCategory).width)
+    .attr('stroke-dasharray', d => edgeStyle(d.edgeCategory).dash)
+    .attr('opacity',          d => edgeStyle(d.edgeCategory).opacity)
+    .attr('marker-end',       d => \`url(#arrow-\${d.edgeCategory || 'content_link'})\`);
+
+  // ── Nodes ──
+  nodeSel = gNodes.selectAll('.node-g')
+    .data(simNodes, d => d.id)
+    .join(
+      enter => {
+        const g = enter.append('g').attr('class', 'node-g').call(drag);
+
+        g.append('circle').attr('class', 'node-circle');
+        g.append('text').attr('class', 'node-label')
+          .attr('text-anchor', 'middle');
+
+        g.on('click', (ev, d) => {
+            ev.stopPropagation();
+            // Toggle pin state
+            if (d.fx !== null && d.fx !== undefined) {
+              d.fx = null; d.fy = null;
+              d3.select(ev.currentTarget).classed('pinned', false);
+            } else {
+              d.fx = d.x; d.fy = d.y;
+              d3.select(ev.currentTarget).classed('pinned', true);
+            }
+            showDetail(d);
+          })
+          .on('dblclick', (ev, d) => {
+            if (d.representativeUrl) window.open(d.representativeUrl, '_blank');
+          })
+          .on('mouseenter', (ev, d) => {
+            // Highlight this node + connected edges + neighbors
+            const connectedIds = new Set([d.id]);
+            linkSel.each(l => {
+              const srcId = typeof l.source === 'object' ? l.source.id : l.source;
+              const tgtId = typeof l.target === 'object' ? l.target.id : l.target;
+              if (srcId === d.id || tgtId === d.id) {
+                connectedIds.add(srcId);
+                connectedIds.add(tgtId);
+              }
+            });
+            nodeSel.select('.node-circle').attr('opacity', n => connectedIds.has(n.id) ? 1 : 0.15);
+            nodeSel.select('.node-label').attr('opacity',  n => connectedIds.has(n.id) ? 1 : 0.1);
+            linkSel.attr('opacity', l => {
+              const srcId = typeof l.source === 'object' ? l.source.id : l.source;
+              const tgtId = typeof l.target === 'object' ? l.target.id : l.target;
+              return (srcId === d.id || tgtId === d.id) ? 1 : 0.04;
+            });
+            showTip(ev, d.tooltip || \`<b>\${d.label}</b>\`);
+          })
+          .on('mousemove', moveTip)
+          .on('mouseleave', () => {
+            // Restore all opacities
+            nodeSel.select('.node-circle').attr('opacity', null);
+            nodeSel.select('.node-label').attr('opacity',  null);
+            linkSel.attr('opacity', l => edgeStyle(l.edgeCategory).opacity);
+            hideTip();
+          });
+
+        return g;
+      },
+      update => update,
+      exit   => exit.remove()
+    );
+
+  // Sync circle + label attributes for all nodes (enter + update)
+  nodeSel.select('.node-circle')
+    .attr('r',            d => d.radius || 10)
+    .attr('fill',         d => d.color || '#74C0FC')
+    .attr('stroke',       d => d.strokeColor || '#2980b9')
+    .attr('stroke-width', d => d.status === 'start' ? 3.5 : 2);
+
+  nodeSel.select('.node-label')
+    .attr('dy',      d => -(d.radius || 10) - 5)
+    .attr('fill',    '#e0e0e0')
+    .attr('font-size', d => d.status === 'start' ? 12 : 10)
+    .attr('font-weight', d => d.status === 'start' ? '700' : '400')
+    .attr('display', labelsOn ? null : 'none')
+    .text(d => d.label);
+}
+
+// ── Tick handler ──────────────────────────────────────────────────────────────
+function ticked() {
+  // Position links: start at source-node edge, end before target-node edge (arrow gap)
+  linkSel.each(function(d) {
+    const src = d.source, tgt = d.target;
+    if (!src || !tgt || typeof src !== 'object' || typeof tgt !== 'object') return;
+    const dx = tgt.x - src.x, dy = tgt.y - src.y;
+    const dist = Math.hypot(dx, dy) || 1;
+    const sr = src.radius || 10;
+    const tr = tgt.radius || 10;
+    d3.select(this)
+      .attr('x1', src.x + (dx / dist) * sr)
+      .attr('y1', src.y + (dy / dist) * sr)
+      .attr('x2', tgt.x - (dx / dist) * (tr + 9))
+      .attr('y2', tgt.y - (dy / dist) * (tr + 9));
+  });
+
+  nodeSel.attr('transform', d => \`translate(\${d.x || 0},\${d.y || 0})\`);
+}
+
+// ── Zoom to fit ───────────────────────────────────────────────────────────────
+function zoomToFit(ms) {
+  const bounds = gMain.node().getBBox();
+  if (!bounds.width || !bounds.height) return;
+  const w = svgW(), h = svgH();
+  const pad = 60;
+  const scale = Math.min(8, 0.9 / Math.max(
+    (bounds.width  + pad * 2) / w,
+    (bounds.height + pad * 2) / h
+  ));
+  const tx = w / 2 - scale * (bounds.x + bounds.width  / 2);
+  const ty = h / 2 - scale * (bounds.y + bounds.height / 2);
+  svg.transition().duration(ms || 600)
+    .call(zoomBehavior.transform, d3.zoomIdentity.translate(tx, ty).scale(scale));
+}
+
+// ── Edge count label ──────────────────────────────────────────────────────────
+function updateEdgeCountLabel() {
+  const vis = MEANINGFUL_EDGES.length
+    + (showBP  ? BOILERPLATE_EDGES.length : 0)
+    + (showOOS ? OOS_EDGES.length         : 0);
+  const hid = (showBP  ? 0 : BOILERPLATE_EDGES.length)
+            + (showOOS ? 0 : OOS_EDGES.length);
+  const el = document.getElementById('edge-count-label');
+  if (el) el.textContent = \`\${simNodes.length} nodes · \${vis} edges visible\`
+    + (hid ? \` (\${hid} hidden)\` : '');
+}
+
+// ── Full rebuild (re-filter links + restart simulation) ───────────────────────
+function rebuild() {
+  const activeLinks = buildLinks();
+  render(activeLinks);
+  simulation.force('link').links(activeLinks);
+  simulation.alpha(0.5).restart();
+  updateEdgeCountLabel();
+}
 
 // ── Controls ──────────────────────────────────────────────────────────────────
-function resetCamera() { Graph.zoomToFit(600, 80); }
+function resetZoom()    { zoomToFit(600); }
 
 function toggleLabels() {
   labelsOn = !labelsOn;
-  // Rebuild node objects with updated label visibility
-  Graph.nodeThreeObject(n => {
-    if (!labelsOn || !n.label) return null;
-    const sprite = new SpriteText(n.label);
-    sprite.color = '#ffffff';
-    sprite.textHeight = 3.5;
-    sprite.backgroundColor = 'rgba(10,10,25,0.65)';
-    sprite.padding = 1.5;
-    return sprite;
-  });
-  // Refresh data so label changes apply
-  const gd = _buildGraphData();
-  Graph.graphData(gd);
+  nodeSel.select('.node-label').attr('display', labelsOn ? null : 'none');
 }
 
-function _updateEdgeCountLabel() {
-  const lbl = document.getElementById('edge-count-label');
-  const visible = MEANINGFUL_EDGES.length
-    + (showBoilerplate    ? BOILERPLATE_EDGES.length  : 0)
-    + (showOutOfScopeRefs ? OUT_OF_SCOPE_EDGES.length : 0);
-  const hidden = (showBoilerplate    ? 0 : BOILERPLATE_EDGES.length)
-               + (showOutOfScopeRefs ? 0 : OUT_OF_SCOPE_EDGES.length);
-  lbl.textContent = \`\${NODES_SRC.length} nodes · \${visible} edges visible\`
-    + (hidden > 0 ? \` (\${hidden} hidden)\` : '');
+function toggleBP() {
+  showBP = !showBP;
+  const btn = document.getElementById('btn-bp');
+  btn.textContent = showBP ? '🔔 Hide Boilerplate' : '🔕 Show Boilerplate';
+  btn.style.color = showBP ? '#FFB347' : '';
+  rebuild();
 }
 
-function _refresh() {
-  Graph.graphData(_buildGraphData());
-  _updateEdgeCountLabel();
-}
-
-function toggleBoilerplateEdges() {
-  showBoilerplate = !showBoilerplate;
-  const btn = document.getElementById('btn-boilerplate');
-  btn.textContent = showBoilerplate ? '🔔 Hide Boilerplate' : '🔕 Show Boilerplate';
-  btn.style.color  = showBoilerplate ? '#FFB347' : '';
-  _refresh();
-}
-
-function toggleOutOfScopeEdges() {
-  showOutOfScopeRefs = !showOutOfScopeRefs;
+function toggleOOS() {
+  showOOS = !showOOS;
   const btn = document.getElementById('btn-oos');
-  btn.textContent = showOutOfScopeRefs ? '🔗 Hide OOS Refs' : '🔗 Show OOS Refs';
-  btn.style.color  = showOutOfScopeRefs ? '#95a5a6' : '';
-  _refresh();
+  btn.textContent = showOOS ? '🔗 Hide OOS Refs' : '🔗 Show OOS Refs';
+  btn.style.color = showOOS ? '#95a5a6' : '';
+  rebuild();
 }
 
-window.resetCamera            = resetCamera;
-window.toggleLabels           = toggleLabels;
-window.toggleBoilerplateEdges = toggleBoilerplateEdges;
-window.toggleOutOfScopeEdges  = toggleOutOfScopeEdges;
-window.Graph                  = Graph;
+// Background click closes detail panel
+svg.on('click.bg', () => {
+  document.getElementById('detail-panel').style.display = 'none';
+});
+
+// ── Window resize ─────────────────────────────────────────────────────────────
+window.addEventListener('resize', () => {
+  simulation
+    .force('center',   d3.forceCenter(svgW() / 2, svgH() / 2))
+    .force('y_center', d3.forceY(svgH() / 2).strength(0.04))
+    .alpha(0.1).restart();
+});
+
+// ── Expose controls to HTML onclick ──────────────────────────────────────────
+window.resetZoom    = resetZoom;
+window.toggleLabels = toggleLabels;
+window.toggleBP     = toggleBP;
+window.toggleOOS    = toggleOOS;
+
+// ── Initial render ────────────────────────────────────────────────────────────
+// Sync boilerplate button label on first load
+(function _initBtnState() {
+  if (showBP) {
+    const btn = document.getElementById('btn-bp');
+    if (btn) { btn.textContent = '🔔 Hide Boilerplate'; btn.style.color = '#FFB347'; }
+  }
+})();
+
+rebuild();
+
+// Zoom to fit once simulation settles (end event + timed fallback)
+simulation.on('end', () => setTimeout(() => zoomToFit(600), 80));
+setTimeout(() => zoomToFit(700), 2400);
 </script>
 </body>
 </html>`;
@@ -1098,7 +1299,7 @@ export async function writeCrawlGraphArtifacts({ graph, finalReport, originalUrl
 
   console.log(`[visualizer] crawl-graph.json  (${graphData.nodes.length} nodes, ${graphData.edges.length} edges)`);
   console.log(`[visualizer] crawl-graph.mmd   (Mermaid flowchart)`);
-  console.log(`[visualizer] crawl-graph.html  (interactive vis-network)`);
+  console.log(`[visualizer] crawl-graph.html  (interactive 3D force-graph)`);
 
   const rel = (f) => `outputs/${jobDirName}/${f}`.replace(/\\/g, '/');
 

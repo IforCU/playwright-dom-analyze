@@ -21,6 +21,12 @@
  *     "username": "user@example.com",
  *     "password": "secret"
  *   },
+ *   "authHints": {                                  // optional
+ *     "usernameSelector": "#email",
+ *     "passwordSelector": "#password",
+ *     "submitSelector":   "button[type=submit]",
+ *     "postLoginSuccessUrlPattern": "/dashboard"
+ *   },
  *   "crawlOptions": {                               // optional
  *     "maxPages":            20,   // default 20, max 200
  *     "maxDepth":            5,    // default 5,  max 20
@@ -45,7 +51,7 @@ import { generateJobId } from '../core/utils.js';
 const router = Router();
 
 router.post('/crawl', async (req, res) => {
-  const { originalUrl, requestUrl: requestUrlInput, credentials, crawlOptions } = req.body ?? {};
+  const { originalUrl, requestUrl: requestUrlInput, credentials, authHints, crawlOptions } = req.body ?? {};
 
   // ── Validate originalUrl ─────────────────────────────────────────────────────────
   if (!originalUrl || typeof originalUrl !== 'string') {
@@ -100,6 +106,45 @@ router.post('/crawl', async (req, res) => {
   }
 
   // ── Validate crawlOptions (optional) ────────────────────────────────────────
+  // ── Validate authHints (optional) ───────────────────────────────────────────
+  // CSS selectors / URL patterns to assist the generic login executor.
+  // Values are accepted as-is (they are used as Playwright CSS selectors or
+  // substring matches only, never eval'd or used in raw SQL or shell commands).
+  let safeAuthHints = null;
+
+  if (authHints !== undefined && authHints !== null) {
+    if (typeof authHints !== 'object' || Array.isArray(authHints)) {
+      return res.status(400).json({ error: '"authHints" must be an object' });
+    }
+    const {
+      usernameSelector, passwordSelector, submitSelector,
+      loginUrlPattern, postLoginSuccessUrlPattern,
+    } = authHints;
+    const strOrUndef = (v, name) => {
+      if (v !== undefined && typeof v !== 'string') {
+        throw new Error(`"authHints.${name}" must be a string`);
+      }
+      return typeof v === 'string' && v.trim() ? v.trim() : undefined;
+    };
+    try {
+      safeAuthHints = {};
+      const us = strOrUndef(usernameSelector,          'usernameSelector');
+      const ps = strOrUndef(passwordSelector,          'passwordSelector');
+      const ss = strOrUndef(submitSelector,            'submitSelector');
+      const lp = strOrUndef(loginUrlPattern,           'loginUrlPattern');
+      const sp = strOrUndef(postLoginSuccessUrlPattern,'postLoginSuccessUrlPattern');
+      if (us) safeAuthHints.usernameSelector            = us;
+      if (ps) safeAuthHints.passwordSelector            = ps;
+      if (ss) safeAuthHints.submitSelector              = ss;
+      if (lp) safeAuthHints.loginUrlPattern             = lp;
+      if (sp) safeAuthHints.postLoginSuccessUrlPattern  = sp;
+      if (!Object.keys(safeAuthHints).length) safeAuthHints = null;
+    } catch (e) {
+      return res.status(400).json({ error: e.message });
+    }
+  }
+
+  // ── Validate crawlOptions (optional) ────────────────────────────────────────
   let safeCrawlOptions = {};
 
   if (crawlOptions !== undefined && crawlOptions !== null) {
@@ -149,6 +194,7 @@ router.post('/crawl', async (req, res) => {
   console.log(`[crawl-route] maxDepth   : ${safeCrawlOptions.maxDepth ?? 5}`);
   console.log(`[crawl-route] parallelPg : ${safeCrawlOptions.maxParallelPages ?? 1}`);
   console.log(`[crawl-route] auth       : ${safeCredentials ? 'credentials provided' : 'none'}`);
+  if (safeAuthHints) console.log('[crawl-route] authHints  : provided');
   console.log('[crawl-route] ──────────────────────────────────');
 
   try {
@@ -158,9 +204,14 @@ router.post('/crawl', async (req, res) => {
       requestUrl:    safeRequestUrl,
       crawlOptions:  safeCrawlOptions,
       credentials:   safeCredentials,
+      authHints:     safeAuthHints,
     });
 
-    const { crawlSummary, pages, durationMs, graphVisualization } = crawlResult.finalReport;
+    const {
+      crawlSummary, pages, durationMs, graphVisualization,
+      preAuthRequired, preAuthAttempted, preAuthSucceeded, preAuthFailed,
+      preAuthReason, authenticatedSessionEstablished, crawlStartedAfterAuth,
+    } = crawlResult.finalReport;
 
     return res.json({
       jobId,
@@ -171,6 +222,15 @@ router.post('/crawl', async (req, res) => {
       pageCount:          pages.length,
       durationMs:         durationMs ?? null,
       graphVisualization: graphVisualization ?? null,
+      preAuth: {
+        required:                    preAuthRequired,
+        attempted:                   preAuthAttempted,
+        succeeded:                   preAuthSucceeded,
+        failed:                      preAuthFailed,
+        reason:                      preAuthReason,
+        authenticatedSessionEstablished,
+        crawlStartedAfterAuth,
+      },
     });
 
   } catch (err) {

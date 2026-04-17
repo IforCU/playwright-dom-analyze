@@ -139,6 +139,22 @@ export async function stabilizePage(page, opts = {}) {
   }
 
   try {
+    // ── Guard: if the page is currently navigating, skip stabilization ───────
+    // A mid-navigation page.evaluate() causes Playwright's internal ref-set
+    // to be destroyed before the result is serialized, producing:
+    //   "TypeError: refs.set is not a function"
+    // We detect this by checking readyState; if not interactive/complete, we
+    // wait up to 4 s for the load to settle before proceeding.
+    try {
+      const readyState = await page.evaluate(() => document.readyState);
+      if (readyState === 'loading') {
+        await page.waitForLoadState('domcontentloaded', { timeout: 4_000 }).catch(() => {});
+      }
+    } catch (_) {
+      // page may be mid-navigation; give it a moment then continue best-effort
+      await page.waitForTimeout(1_000).catch(() => {});
+    }
+
     // ── Stage 3: Pause autoplay media first ─────────────────────────────────
     // Run before overlay detection so video controls do not appear as dismiss
     // buttons and so continuous playback does not cause mutation noise during
@@ -516,7 +532,13 @@ async function _detectBlockersAndButtons(page, params) {
     // Return highest-scored blockers first
     results.sort((a, b) => b.score - a.score);
     return results;
-  }, params);
+  }, params).catch((err) => {
+    // A navigation that happens during evaluate() destroys the Playwright
+    // serialization refs buffer and throws "refs.set is not a function".
+    // Treat it as a non-fatal "no blockers found" result so the crawl continues.
+    console.log(`[stabilize]  blocker detection skipped (page navigated mid-evaluate): ${err.message}`);
+    return [];
+  });
 }
 
 // ── Media control ─────────────────────────────────────────────────────────────

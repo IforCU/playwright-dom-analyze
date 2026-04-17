@@ -374,7 +374,7 @@ export async function runAnalysis({
         width: Math.max(document.body.scrollWidth, document.documentElement.scrollWidth, document.body.offsetWidth, document.documentElement.offsetWidth, document.documentElement.clientWidth),
         height: Math.max(document.body.scrollHeight, document.documentElement.scrollHeight, document.body.offsetHeight, document.documentElement.offsetHeight, document.documentElement.clientHeight)
       };
-    });
+    }).catch(() => ({ width: 1920, height: 1080 }));
     
     console.log(`[phase1]  page dimensions: ${dimensions.width}x${dimensions.height}`);
     
