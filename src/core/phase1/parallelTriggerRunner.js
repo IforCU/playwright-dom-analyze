@@ -62,6 +62,12 @@ export async function runTriggersParallel(browser, url, candidates, outDir, conf
   const {
     maxWorkers                      = 4,
     screenshotMode                  = 'changedRegion',
+    // screenshotPolicy controls when screenshots are taken:
+    //   'always'   — screenshot every trigger result (original behavior)
+    //   'on_delta' — screenshot only when delta node count >= triggerMinDeltaScore
+    //   'skip'     — no screenshots (fastest; DOM delta metadata only)
+    screenshotPolicy                = 'on_delta',
+    triggerMinDeltaScore            = 1,
     fallbackToFullPageOnClipFailure = true,
     autoDynamicRegions              = [],
     autoDynamicOverlapThreshold     = 0.3,
@@ -78,6 +84,8 @@ export async function runTriggersParallel(browser, url, candidates, outDir, conf
 
   const triggerOpts = {
     screenshotMode,
+    screenshotPolicy,
+    triggerMinDeltaScore,
     fallbackToFullPageOnClipFailure,
     autoDynamicRegions,
     autoDynamicOverlapThreshold,

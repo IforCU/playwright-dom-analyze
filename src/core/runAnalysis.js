@@ -49,9 +49,14 @@ import { checkRenderReadiness,
 import { extractStaticNodes,
          getPageMeta,
          getPageLinks }                                  from './phase1/staticAnalysis.js';
-import { findTriggerCandidates }                         from './phase1/triggerDiscovery.js';
+import { findTriggerCandidates, assignProbeTiers, groupAndSampleCandidates } from './phase1/triggerDiscovery.js';
 import { runTriggersParallel }                           from './phase1/parallelTriggerRunner.js';
 import { detectAutoDynamicRegions }                      from './phase1/autoDynamicDetector.js';
+import { installNavigationDefense,
+         lockNavigationDefense,
+         getDefenseState,
+         waitForPostAuthStability,
+         probePostAuthReadiness }                       from './phase1/spaNavigationDefense.js';
 
 // ── Shared core utilities ──────────────────────────────────────────────────────
 import { annotateScreenshot }                            from './annotate.js';
@@ -143,6 +148,78 @@ const CONFIG = {
   // Per-request overrides are accepted via runAnalysis params.
   // These CONFIG values are the env-backed fallback defaults.
   MAX_PARALLEL_PREFLIGHT_CHECKS: parseInt(process.env.MAX_PARALLEL_PREFLIGHT_CHECKS || '8', 10),
+
+  // ── Tiered trigger exploration ─────────────────────────────────────────────
+  // Trigger candidates are grouped by structural signature (tag+class+probeMode)
+  // and only a representative sample from each group is executed, avoiding
+  // redundant exploration of repeated navigation links or card buttons.
+  //
+  // MAX_TRIGGER_GROUPS_PER_PAGE: max distinct structural groups to explore.
+  // MAX_TRIGGER_REPS_PER_GROUP:  max candidates selected from each group.
+  // MAX_TRIGGERS cap still applies as an absolute ceiling after sampling.
+  //
+  // TRIGGER_SCREENSHOT_POLICY:
+  //   'always'    — screenshot every trigger (expensive, original behavior)
+  //   'on_delta'  — screenshot only when meaningful DOM delta detected (default)
+  //   'skip'      — no screenshots (fastest; DOM delta only)
+  MAX_TRIGGER_GROUPS_PER_PAGE:   parseInt(process.env.MAX_TRIGGER_GROUPS   || '12', 10),
+  MAX_TRIGGER_REPS_PER_GROUP:    parseInt(process.env.MAX_TRIGGER_REPS     || '3',  10),
+  TRIGGER_SCREENSHOT_POLICY:     process.env.TRIGGER_SCREENSHOT_POLICY      || 'on_delta',
+  // Minimum delta node count for a trigger result to be considered meaningful.
+  // Triggers producing fewer new/changed nodes than this threshold are skipped
+  // for screenshot capture when policy='on_delta'.
+  TRIGGER_MIN_DELTA_SCORE:       parseInt(process.env.TRIGGER_MIN_DELTA    || '1',  10),
+
+  // ── Post-login SPA stability (nav defense) ──────────────────────────────────
+  // When a storageState is provided, the page opens into a post-auth context.
+  // Aggressive SPAs immediately fire client-side navigation (route transitions,
+  // keepalive redirects, token refresh) that destroys the Playwright V8 context
+  // during page.evaluate() calls.
+  //
+  // NAV_DEFENSE_ENABLED:
+  //   When true (default), install addInitScript-based navigation interception
+  //   on the analysis context. This runs before SPA scripts and patches
+  //   history.pushState, location.assign, location.replace, etc.
+  //   Set to 'false' only for non-SPA sites where the defense causes problems.
+  //
+  // POST_AUTH_SETTLE_MS:
+  //   After navigating to the target URL with auth credentials, wait this long
+  //   for the page URL to stabilize before running DOM analysis.
+  //   The SPA is allowed to complete its initial auth redirects during this window.
+  //
+  // ANALYSIS_READY_QUIET_WINDOW_MS:
+  //   URL must remain unchanged for this many ms before we declare it stable.
+  //
+  // MAX_AUTH_STABILIZATION_MS:
+  //   Total budget for post-auth stabilization.  If exceeded, continue in
+  //   degraded mode with best-effort analysis.
+  //
+  // SECOND_PASS_REENTRY:
+  //   When true (default), after the URL stabilizes re-navigate to the final
+  //   settled URL in the same defended context.  This ensures the defense script
+  //   is active from the very first moment of the final page load, preventing
+  //   the SPA from auto-redirecting before analysis starts.
+  NAV_DEFENSE_ENABLED:             process.env.NAV_DEFENSE_ENABLED           !== 'false',
+  POST_AUTH_SETTLE_MS:             parseInt(process.env.POST_AUTH_SETTLE_MS          || '15000', 10),
+  ANALYSIS_READY_QUIET_WINDOW_MS:  parseInt(process.env.ANALYSIS_READY_QUIET_WINDOW  || '2000',  10),
+  MAX_AUTH_STABILIZATION_MS:       parseInt(process.env.MAX_AUTH_STABILIZATION_MS    || '20000', 10),
+  SECOND_PASS_REENTRY:             process.env.SECOND_PASS_REENTRY           !== 'false',
+  // ── Post-auth DOM readiness probe ──────────────────────────────────────────
+  // After URL stabilizes and nav defense locks, probe the DOM for readiness
+  // before allowing extraction to proceed.
+  // POST_AUTH_READY_QUIET_WINDOW_MS: time between readiness probe rounds
+  // MIN_EVALUATE_SUCCESSES_BEFORE_ANALYSIS: consecutive passing probes required
+  // MAX_POST_AUTH_READINESS_WAIT_MS: total budget for the readiness probe
+  POST_AUTH_DOM_PROBE_ENABLED:             process.env.POST_AUTH_DOM_PROBE !== 'false',
+  POST_AUTH_READY_QUIET_WINDOW_MS:         parseInt(process.env.POST_AUTH_READY_QUIET_WINDOW || '600',  10),
+  MIN_EVALUATE_SUCCESSES_BEFORE_ANALYSIS:  parseInt(process.env.MIN_EVALUATE_SUCCESSES       || '2',    10),
+  MAX_POST_AUTH_READINESS_WAIT_MS:         parseInt(process.env.MAX_POST_AUTH_READINESS_WAIT  || '12000', 10),
+  // ── Analysis retry on empty DOM (Part 3) ───────────────────────────────────
+  // When screenshot exists but DOM extraction returns 0 nodes due to
+  // execution-context destruction or post-auth instability, attempt one
+  // controlled retry in a fresh authenticated context with a stricter quiet
+  // window before accepting the empty result.
+  ANALYSIS_RETRY_ON_EMPTY_DOM:     process.env.ANALYSIS_RETRY_ON_EMPTY_DOM  !== 'false',
 };
 
 // ── Entry point ────────────────────────────────────────────────────────────────
@@ -316,20 +393,194 @@ export async function runAnalysis({
 
     console.log('[phase1] ── starting ─────────────────────────');
 
+    // ── SPA navigation defense flags (tracked for final report) ───────────────
+    const navDefenseEnabled      = CONFIG.NAV_DEFENSE_ENABLED;
+    // navDefenseApplied: true if we successfully installed & locked the defense
+    let navDefenseApplied        = false;
+    let blockedNavigationCount   = 0;
+    // postAuthMode: true when this page is being analyzed with an auth storageState
+    const postAuthMode           = !!storageStatePath;
+    let postAuthStabilizationResult = null;   // filled in during auth settle
+    let analysisContextReused    = false;     // true when a second-pass re-entry is done
+    let finalEffectiveAnalysisUrl = requestUrl;
+    let analysisQualityNote      = null;      // human-readable quality explanation
+    // ── PART 5: URL and timestamp tracking ─────────────────────────────────────
+    // Track WHICH URL was active when screenshot and extraction steps ran, and
+    // WHEN each happened, so we can detect cross-step URL drift.
+    let screenshotCapturedAtUrl   = null;
+    let screenshotCapturedAtTime  = null;
+    let staticNodesExtractedAtUrl = null;
+    let staticNodesExtractedAtTime= null;
+    let linksExtractedAtUrl       = null;
+    let linksExtractedAtTime      = null;
+    // ── Post-auth DOM readiness probe result ──────────────────────────────────
+    let postAuthDomProbeResult    = null;
+
+    // ── PART 1+2: Auth context / Analysis context separation ──────────────────
+    //
+    // When a storageState is provided (post-login mode), we use a two-phase approach:
+    //
+    //   Phase A — Auth resolution:
+    //     Open the URL in a fresh defended context.  The SPA is allowed to perform
+    //     its initial auth redirects (history API, location.assign, etc.) during
+    //     this window.  Our addInitScript defense is installed but starts UNLOCKED,
+    //     so navigation passes through.  We watch the URL until it stabilizes.
+    //
+    //   Phase B — Analysis lock:
+    //     Once the URL has settled, lock the defense (block further navigation)
+    //     and optionally do a second-pass re-goto to the settled URL to ensure
+    //     the SPA starts fresh under a fully locked context.
+    //     DOM extraction, screenshots, and trigger exploration run in Phase B.
+    //
+    // Without storageState (unauthenticated mode), the simpler original flow runs.
+
     const baseCtx  = await createFreshContext(browser, { storageState: storageStatePath });
     await baseCtx.addInitScript(MUTATION_TRACKER_SCRIPT);
+
+    // PART 1: Install addInitScript navigation defense BEFORE first page load.
+    // This means the defense is present from the very first script execution —
+    // even before the SPA framework initializes.  It starts in ALLOW mode.
+    if (navDefenseEnabled) {
+      await installNavigationDefense(baseCtx);
+    }
+
     const basePage = await baseCtx.newPage();
+
+    // ── First navigation — allow auth redirect storm to resolve ───────────────
+    //
+    // In post-auth mode, the first goto may land on the target URL or immediately
+    // redirect (SPA auth gate, token refresh, SSO callback).  We let it happen.
+    // In non-auth mode this is just the normal initial navigation.
     await navigateTo(basePage, requestUrl);
     await installMutationTracker(basePage);
 
-    // ── PART1+2: Render readiness check ──────────────────────────────────────
+    // ── Post-auth URL stabilization ───────────────────────────────────────────
+    //
+    // PART 3: Wait for the URL to stop changing before locking the defense
+    // and running any page.evaluate() calls.  This is the core protection
+    // against execution-context destruction mid-evaluate.
+    if (postAuthMode) {
+      console.log('[post-auth] storageState active — waiting for URL to stabilize before analysis …');
+      postAuthStabilizationResult = await waitForPostAuthStability(basePage, {
+        quietWindowMs:  CONFIG.ANALYSIS_READY_QUIET_WINDOW_MS,
+        maxWaitMs:      CONFIG.POST_AUTH_SETTLE_MS,
+        pollIntervalMs: 250,
+        requireBody:    true,
+      });
+
+      finalEffectiveAnalysisUrl = postAuthStabilizationResult.finalUrl;
+
+      if (!postAuthStabilizationResult.stable) {
+        console.log(`[post-auth] WARNING — page did not fully stabilize: ${postAuthStabilizationResult.reason}`);
+        analysisQualityNote =
+          'login succeeded, but SPA auto-navigation caused instability during post-auth settle; ' +
+          'results may be degraded';
+      } else {
+        console.log(`[post-auth] page stable at: ${finalEffectiveAnalysisUrl}`);
+      }
+
+      // PART 3 cont.: Second-pass re-entry.
+      // Re-navigate to the settled URL so the SPA starts fresh with the defense
+      // already installed (from addInitScript) and then immediately locked.
+      // This prevents the SPA from firing its boot-time route transitions during
+      // the analysis window.
+      const settledUrl = postAuthStabilizationResult.finalUrl;
+
+      if (CONFIG.SECOND_PASS_REENTRY) {
+        const reentryUrl = settledUrl ?? requestUrl;
+        console.log(`[post-auth] second-pass re-entry → ${reentryUrl} (defense will lock immediately after load)`);
+        try {
+          // Navigate again — addInitScript defense is already registered on the context,
+          // so it runs before SPA scripts on this new load too.
+          await basePage.goto(reentryUrl, { waitUntil: 'load', timeout: 35_000 });
+          await basePage.waitForLoadState('networkidle', { timeout: 6_000 }).catch(() => {});
+          await basePage.waitForTimeout(800);
+          analysisContextReused = true;
+          finalEffectiveAnalysisUrl = basePage.url();
+          console.log(`[post-auth] re-entry complete — final URL: ${finalEffectiveAnalysisUrl}`);
+
+          // Re-install mutation tracker on the new load
+          await installMutationTracker(basePage).catch((err) => {
+            console.log(`[post-auth] mutation tracker re-install failed (${err.message})`);
+          });
+        } catch (reentryErr) {
+          console.log(`[post-auth] second-pass re-entry failed (${reentryErr.message}) — continuing with current page`);
+        }
+      }
+
+      // PART 1 — LOCK the navigation defense now that the page is stable.
+      // From this point forward, any client-side navigation attempt (pushState,
+      // location.assign, etc.) is intercepted and suppressed.
+      if (navDefenseEnabled) {
+        navDefenseApplied = await lockNavigationDefense(basePage);
+        if (navDefenseApplied) {
+          console.log('[nav-defense] locked — SPA navigation blocked for analysis');
+        }
+      }
+
+      // PART 2 — DOM readiness probe after lock.
+      // Before proceeding to DOM extraction, verify the page's DOM is actually
+      // ready: body present, elements rendered, title set.  Repeated evaluate
+      // failures here indicate the context is still unstable despite the lock.
+      if (CONFIG.POST_AUTH_DOM_PROBE_ENABLED) {
+        console.log('[post-auth-readiness] running DOM readiness probe …');
+        postAuthDomProbeResult = await probePostAuthReadiness(basePage, {
+          minElementCount:      10,
+          minEvaluateSuccesses: CONFIG.MIN_EVALUATE_SUCCESSES_BEFORE_ANALYSIS,
+          maxWaitMs:            CONFIG.MAX_POST_AUTH_READINESS_WAIT_MS,
+          quietWindowMs:        CONFIG.POST_AUTH_READY_QUIET_WINDOW_MS,
+          expectedUrl:          finalEffectiveAnalysisUrl,
+        });
+        if (!postAuthDomProbeResult.ready) {
+          console.log(`[post-auth-readiness] WARNING — DOM not ready: ${postAuthDomProbeResult.reason}`);
+          if (!analysisQualityNote) {
+            analysisQualityNote =
+              `post-auth DOM readiness probe failed (${postAuthDomProbeResult.reason}); ` +
+              `evaluate failures=${postAuthDomProbeResult.evaluateFailures} — extraction may be empty`;
+          }
+        } else {
+          console.log(`[post-auth-readiness] ready — score=${postAuthDomProbeResult.score} waited=${postAuthDomProbeResult.waitedMs}ms`);
+        }
+      }
+    }
+
+    // PART 4 — PART 1+2: Render readiness check ──────────────────────────────
     // Gates Phase 1 until the page has settled sufficiently.  Results are
     // stored in render-readiness.json for audit / quality tracking.
+    // In post-auth mode we've already done our own stabilization above, but
+    // the readiness checker still runs as a quality measurement gate.
     console.log('[render-readiness] checking …');
     const readinessResult = await checkRenderReadiness(basePage);
     await writeJson(path.join(outDir, 'render-readiness.json'), readinessResult);
     if (readinessResult.degradedMode) {
       console.log(`[render-readiness] DEGRADED — proceeding anyway: ${readinessResult.message}`);
+      // In post-auth mode we have already performed the second-pass re-entry above,
+      // so we skip the re-navigate here to avoid undoing the defense lock.
+      // In non-auth mode, attempt a re-navigate to get a stable context.
+      if (!postAuthMode) {
+        console.log('[render-readiness] waiting for current navigation to settle …');
+        await basePage.waitForLoadState('domcontentloaded', { timeout: 12_000 }).catch(() => {});
+        await basePage.waitForTimeout(1_000).catch(() => {});
+
+        console.log(`[render-readiness] re-navigating to ${requestUrl} for stable context …`);
+        try {
+          await basePage.goto(requestUrl, { waitUntil: 'load', timeout: 30_000 });
+          await basePage.waitForLoadState('networkidle', { timeout: 6_000 }).catch(() => {});
+          await basePage.waitForTimeout(1_000);
+        } catch (navErr) {
+          console.log(`[render-readiness]  re-navigate failed (${navErr.message}) — continuing with current page`);
+        }
+
+        await installMutationTracker(basePage).catch((err) => {
+          console.log(`[render-readiness]  tracker re-install failed (${err.message}) — continuing best-effort`);
+        });
+        console.log(`[render-readiness] stable context ready at: ${basePage.url()}`);
+      } else {
+        console.log('[render-readiness] skipping re-navigate (post-auth second-pass already performed)');
+        if (!analysisQualityNote) {
+          analysisQualityNote = 'render readiness degraded after post-auth stabilization; results may be partial';
+        }
+      }
     } else {
       console.log(`[render-readiness] OK — score=${readinessResult.readinessScore} signals=${readinessResult.passedSignals}/${readinessResult.totalSignals}`);
     }
@@ -364,44 +615,306 @@ export async function runAnalysis({
 
     // Reset mutations accumulated during stabilization so that the auto-dynamic
     // observation window starts from a clean baseline (no stabilization noise).
-    await resetMutations(basePage);
+    // Guard: if the page navigated during stabilization the tracker may not be
+    // present — catch the error and re-install rather than crashing.
+    await resetMutations(basePage).catch(async (err) => {
+      console.log(`[phase1]  resetMutations failed (${err.message}) — re-installing tracker`);
+      await installMutationTracker(basePage).catch(() => {});
+    });
 
     const baselinePng = path.join(outDir, 'baseline.png');
     
-    // Check page dimensions before taking fullPage screenshot to avoid Skia allocation errors
-    const dimensions = await basePage.evaluate(() => {
-      return {
-        width: Math.max(document.body.scrollWidth, document.documentElement.scrollWidth, document.body.offsetWidth, document.documentElement.offsetWidth, document.documentElement.clientWidth),
-        height: Math.max(document.body.scrollHeight, document.documentElement.scrollHeight, document.body.offsetHeight, document.documentElement.offsetHeight, document.documentElement.clientHeight)
-      };
-    }).catch(() => ({ width: 1920, height: 1080 }));
-    
+    // Check page dimensions before taking fullPage screenshot to avoid Skia allocation errors.
+    // NOTE: when the page is mid-navigation, page.evaluate() may RESOLVE with undefined
+    // (rather than rejecting), so .catch() alone is not sufficient — we also apply
+    // the nullish-coalescing fallback after the await.
+    const dimensions = (
+      await basePage.evaluate(() => ({
+        width:  Math.max(document.body.scrollWidth,  document.documentElement.scrollWidth,  document.body.offsetWidth,  document.documentElement.offsetWidth,  document.documentElement.clientWidth),
+        height: Math.max(document.body.scrollHeight, document.documentElement.scrollHeight, document.body.offsetHeight, document.documentElement.offsetHeight, document.documentElement.clientHeight),
+      })).catch(() => null)
+    ) ?? { width: 1920, height: 1080 };
+
     console.log(`[phase1]  page dimensions: ${dimensions.width}x${dimensions.height}`);
     
     // If the page is excessively tall or wide, fall back to a viewport screenshot
     // to prevent SkBitmap pixel allocation crash (e.g. w:115024 h:6234).
-    if (dimensions.height > 15000 || dimensions.width > 8000) {
-      console.log('[phase1]  page too large for fullPage screenshot, using viewport screenshot');
-      await basePage.screenshot({ path: baselinePng, fullPage: false });
-    } else {
-      try {
-        await basePage.screenshot({ path: baselinePng, fullPage: true });
-      } catch (err) {
-        console.log(`[phase1]  fullPage screenshot failed (${err.message}), retrying with viewport screenshot...`);
+    // Outer try-catch: if the page navigates mid-screenshot, skip the screenshot
+    // rather than crashing the entire analysis pipeline.
+    try {
+      if (dimensions.height > 15000 || dimensions.width > 8000) {
+        console.log('[phase1]  page too large for fullPage screenshot, using viewport screenshot');
         await basePage.screenshot({ path: baselinePng, fullPage: false });
+      } else {
+        try {
+          await basePage.screenshot({ path: baselinePng, fullPage: true });
+        } catch (err) {
+          console.log(`[phase1]  fullPage screenshot failed (${err.message}), retrying with viewport screenshot...`);
+          await basePage.screenshot({ path: baselinePng, fullPage: false });
+        }
       }
+    } catch (screenshotErr) {
+      // Page navigated or context was destroyed mid-screenshot.  Write an empty
+      // placeholder so downstream code always finds baseline.png.
+      console.log(`[phase1]  screenshot failed entirely (${screenshotErr.message}) — writing placeholder`);
+      await fs.writeFile(baselinePng, Buffer.alloc(0));
     }
+    // PART 5: record the URL and time at which the screenshot was taken.
+    screenshotCapturedAtUrl  = (() => { try { return basePage.url(); } catch { return finalEffectiveAnalysisUrl; } })();
+    screenshotCapturedAtTime = new Date().toISOString();
     console.log('[phase1]  baseline.png saved');
 
+    // ── SECONDARY network-level navigation block ───────────────────────────────
+    // This is a second-layer defense on top of the addInitScript JS-level block.
+    // route() operates at the network layer and catches navigation requests that
+    // slip through the JS interceptors (e.g. server-triggered redirects, browser
+    // back/forward navigation).
+    //
+    // NOTE: route() alone is NOT sufficient because:
+    //   1. JS-triggered pushState/replaceState generate no network request.
+    //   2. route() fires AFTER the browser has committed to the navigation —
+    //      the V8 context may already be destroyed by then.
+    // The addInitScript defense above addresses those gaps.
+    console.log('[phase1]  installing secondary network-level navigation block …');
+    await basePage.route('**/*', (route) => {
+      if (route.request().isNavigationRequest()) {
+        blockedNavigationCount++;
+        console.log(`[phase1]  BLOCKED network navigation: ${route.request().url()}`);
+        return route.abort('aborted');
+      }
+      return route.continue();
+    });
+
+    // ── PART 5: DOM extraction with degradation metadata ─────────────────────
+    // Each call is independent so that a failure in one does not block the others.
+    // When a navigation-destroyed context is detected, a safe fallback is returned
+    // and the failure is recorded in the degradation metadata for the final report.
+    const _NAV_ERRS = ['refs.set', 'Execution context was destroyed',
+                       'Target page, context or browser has been closed',
+                       'navigation', 'detached'];
+    const _isNavErr = (err) => _NAV_ERRS.some((s) => err.message?.toLowerCase().includes(s.toLowerCase()));
+
+    // Degradation tracking — populated by failed evaluate calls below
+    const evaluateDegradation = {
+      getPageMeta:          { degraded: false, reason: null },
+      extractStaticNodes:   { degraded: false, reason: null },
+      getPageLinks:         { degraded: false, reason: null },
+    };
+
     console.log('[phase1]  extracting static nodes, metadata and links …');
-    const [pageMeta, nodeResult, pageLinks] = await Promise.all([
-      getPageMeta(basePage),
-      extractStaticNodes(basePage, CONFIG.NODE_FILTER),
-      getPageLinks(basePage),
-    ]);
-    const allNodes             = nodeResult.nodes;
-    const droppedNodes         = nodeResult.droppedNodes;
-    const visibilityMismatches = nodeResult.visibilityMismatches ?? [];
+    const pageMeta = (await getPageMeta(basePage).catch((err) => {
+      if (_isNavErr(err)) {
+        const msg = `navigation mid-evaluate (${err.message.slice(0, 80)})`;
+        console.log(`[phase1]  getPageMeta: ${msg} — using fallback`);
+        evaluateDegradation.getPageMeta = { degraded: true, reason: msg };
+        return null;
+      }
+      throw err;
+    })) ?? { finalUrl: requestUrl, title: '', description: '', lang: '', canonical: null,
+             ogUrl: null, viewport: null, robots: null, metaTags: [] };
+
+    const nodeResult = (await extractStaticNodes(basePage, CONFIG.NODE_FILTER).catch((err) => {
+      if (_isNavErr(err)) {
+        const msg = `navigation mid-evaluate (${err.message.slice(0, 80)})`;
+        console.log(`[phase1]  extractStaticNodes: ${msg} — using empty result`);
+        evaluateDegradation.extractStaticNodes = { degraded: true, reason: msg };
+        return null;
+      }
+      throw err;
+    })) ?? { nodes: [], droppedNodes: [], visibilityMismatches: [] };
+    // PART 5: record URL/time after static node extraction
+    staticNodesExtractedAtUrl  = (() => { try { return basePage.url(); } catch { return finalEffectiveAnalysisUrl; } })();
+    staticNodesExtractedAtTime = new Date().toISOString();
+
+    const pageLinks = (await getPageLinks(basePage).catch((err) => {
+      if (_isNavErr(err)) {
+        const msg = `navigation mid-evaluate (${err.message.slice(0, 80)})`;
+        console.log(`[phase1]  getPageLinks: ${msg} — using empty result`);
+        evaluateDegradation.getPageLinks = { degraded: true, reason: msg };
+        return null;
+      }
+      throw err;
+    })) ?? { anchors: [], areas: [], formActions: [] };
+    // PART 5: record URL/time after link extraction
+    linksExtractedAtUrl  = (() => { try { return basePage.url(); } catch { return finalEffectiveAnalysisUrl; } })();
+    linksExtractedAtTime = new Date().toISOString();
+
+    // Summarize degradation for quality classification
+    const anyDegraded = Object.values(evaluateDegradation).some((v) => v.degraded);
+    if (anyDegraded) {
+      const degradedSteps = Object.entries(evaluateDegradation)
+        .filter(([, v]) => v.degraded).map(([k]) => k).join(', ');
+      console.log(`[phase1]  DEGRADED evaluate steps: ${degradedSteps}`);
+      if (!analysisQualityNote) {
+        analysisQualityNote =
+          `execution-context destruction during DOM extraction (${degradedSteps}); ` +
+          'analysis retried in defended context but page remained unstable';
+      }
+    }
+
+    // PART 5: warn when screenshot URL differs from extraction URL
+    if (screenshotCapturedAtUrl && staticNodesExtractedAtUrl &&
+        screenshotCapturedAtUrl !== staticNodesExtractedAtUrl) {
+      console.log(
+        `[phase1]  WARNING — URL drift: screenshot@${screenshotCapturedAtUrl} ` +
+        `vs DOM@${staticNodesExtractedAtUrl}`
+      );
+      if (!analysisQualityNote) {
+        analysisQualityNote =
+          'screenshot was captured on final page state, but DOM extraction happened after execution context changed';
+      }
+    }
+
+    // ── PART 1+6+8: Phase 1 quality gate (first pass) ─────────────────────────
+    // Compute quality classification BEFORE the retry, so we know whether to retry.
+    // Re-evaluated after retry if retry is attempted.
+    const screenshotExists = (await fs.stat(baselinePng).then((s) => s.size > 0).catch(() => false));
+    const firstPassQuality = _computePhase1Quality({
+      evaluateDegradation,
+      allNodes: nodeResult.nodes,
+      pageLinks,
+      screenshotExists,
+      postAuthMode,
+    });
+    console.log(
+      `[phase1]  quality gate (first pass): ${firstPassQuality.phase1QualityState}` +
+      ` nodes=${firstPassQuality.rawNodeCount} links=${firstPassQuality.totalLinks}` +
+      ` domOk=${firstPassQuality.domExtractionSucceeded}` +
+      (firstPassQuality.emptyResultCause ? ` cause=${firstPassQuality.emptyResultCause}` : '')
+    );
+
+    // ── PART 3: Analysis retry pass on screenshot-only / context-destroyed result ─
+    // When the first pass yielded 0 nodes due to context destruction or post-auth
+    // instability, attempt one controlled retry in a fresh authenticated context.
+    // The retry uses the same storageState, installs nav defense from the start,
+    // locks immediately after a strict quiet window, then re-runs all extraction.
+    let analysisRetryAttempted    = false;
+    let analysisRetrySucceeded    = false;
+    let analysisRetryImprovedNodeCount = 0;
+    const _shouldRetry = CONFIG.ANALYSIS_RETRY_ON_EMPTY_DOM &&
+      storageStatePath &&   // only when we have auth credentials to reuse
+      firstPassQuality.rawNodeCount === 0 &&
+      ['screenshot_only_no_dom', 'context_destroyed_mid_analysis', 'post_auth_unstable']
+        .includes(firstPassQuality.phase1QualityState);
+
+    if (_shouldRetry) {
+      console.log(`[phase1-retry] Attempting DOM re-extraction in fresh defended context (cause: ${firstPassQuality.emptyResultCause}) …`);
+      analysisRetryAttempted = true;
+      const retryUrl = finalEffectiveAnalysisUrl || requestUrl;
+
+      let retryCtx = null;
+      try {
+        retryCtx = await createFreshContext(browser, { storageState: storageStatePath });
+        await retryCtx.addInitScript(MUTATION_TRACKER_SCRIPT);
+        if (navDefenseEnabled) {
+          await installNavigationDefense(retryCtx);
+        }
+
+        const retryPage = await retryCtx.newPage();
+        await navigateTo(retryPage, retryUrl);
+        await installMutationTracker(retryPage).catch(() => {});
+
+        // Wait for URL to settle with a stricter quiet window
+        const retryStability = await waitForPostAuthStability(retryPage, {
+          quietWindowMs:  Math.max(CONFIG.ANALYSIS_READY_QUIET_WINDOW_MS, 3000),
+          maxWaitMs:      CONFIG.POST_AUTH_SETTLE_MS,
+          pollIntervalMs: 250,
+          requireBody:    true,
+        });
+        console.log(`[phase1-retry] URL stability: stable=${retryStability.stable} url=${retryStability.finalUrl}`);
+
+        // Lock nav defense
+        if (navDefenseEnabled) {
+          await lockNavigationDefense(retryPage).catch(() => {});
+        }
+
+        // Stricter DOM readiness probe
+        const retryReadiness = await probePostAuthReadiness(retryPage, {
+          minElementCount:      10,
+          minEvaluateSuccesses: Math.max(CONFIG.MIN_EVALUATE_SUCCESSES_BEFORE_ANALYSIS, 3),
+          maxWaitMs:            CONFIG.MAX_POST_AUTH_READINESS_WAIT_MS,
+          quietWindowMs:        CONFIG.POST_AUTH_READY_QUIET_WINDOW_MS,
+          expectedUrl:          retryStability.finalUrl,
+        });
+        console.log(`[phase1-retry] DOM probe: ready=${retryReadiness.ready} score=${retryReadiness.score}`);
+
+        // Install secondary network block
+        await retryPage.route('**/*', (route) => {
+          if (route.request().isNavigationRequest()) return route.abort('aborted');
+          return route.continue();
+        });
+
+        // Re-extract DOM
+        const retryMeta = await getPageMeta(retryPage).catch(() => null);
+        const retryNodeResult = await extractStaticNodes(retryPage, CONFIG.NODE_FILTER).catch(() => null);
+        const retryLinks      = await getPageLinks(retryPage).catch(() => null);
+
+        const retryNodes     = retryNodeResult?.nodes ?? [];
+        const retryPageLinks = retryLinks ?? { anchors: [], areas: [], formActions: [] };
+        const retryLinkCount = (retryPageLinks.anchors?.length ?? 0) +
+                               (retryPageLinks.areas?.length ?? 0) +
+                               (retryPageLinks.formActions?.length ?? 0);
+
+        console.log(`[phase1-retry] result: nodes=${retryNodes.length} links=${retryLinkCount}`);
+
+        if (retryNodes.length > allNodes.length || retryLinkCount > 0) {
+          // Retry produced better results — adopt them
+          analysisRetrySucceeded          = true;
+          analysisRetryImprovedNodeCount  = retryNodes.length - allNodes.length;
+
+          // Patch the live variables that downstream code references
+          nodeResult.nodes        = retryNodes;
+          nodeResult.droppedNodes = retryNodeResult?.droppedNodes ?? [];
+          if (retryMeta)  Object.assign(pageMeta, retryMeta);
+          Object.assign(pageLinks, retryPageLinks);
+
+          // Update URL tracking to retry context
+          staticNodesExtractedAtUrl  = (() => { try { return retryPage.url(); } catch { return retryUrl; } })();
+          staticNodesExtractedAtTime = new Date().toISOString();
+          linksExtractedAtUrl        = staticNodesExtractedAtUrl;
+          linksExtractedAtTime       = staticNodesExtractedAtTime;
+
+          // Clear the degradation flags that triggered this retry
+          if (evaluateDegradation.extractStaticNodes.degraded && retryNodes.length > 0) {
+            evaluateDegradation.extractStaticNodes = { degraded: false, reason: 'cleared by successful retry' };
+          }
+          if (evaluateDegradation.getPageLinks.degraded && retryLinkCount > 0) {
+            evaluateDegradation.getPageLinks = { degraded: false, reason: 'cleared by successful retry' };
+          }
+
+          console.log(`[phase1-retry] IMPROVED — adopted retry results (nodes +${analysisRetryImprovedNodeCount})`);
+        } else {
+          console.log('[phase1-retry] retry did not improve results — keeping first pass');
+        }
+      } catch (retryErr) {
+        console.log(`[phase1-retry] retry failed: ${retryErr.message}`);
+      } finally {
+        if (retryCtx) {
+          await retryCtx.close().catch(() => {});
+        }
+      }
+    }
+
+    // ── Refresh extracted data references after potential retry ───────────────
+    // allNodes / droppedNodes / visibilityMismatches may have been patched by retry.
+
+    // ── PART 1+6+8: Final quality gate ────────────────────────────────────────
+    const finalQuality = analysisRetryAttempted
+      ? _computePhase1Quality({
+          evaluateDegradation,
+          allNodes: nodeResult.nodes,
+          pageLinks,
+          screenshotExists,
+          postAuthMode,
+        })
+      : firstPassQuality;
+
+    if (analysisRetryAttempted) {
+      console.log(
+        `[phase1]  quality gate (after retry): ${finalQuality.phase1QualityState}` +
+        ` nodes=${finalQuality.rawNodeCount} links=${finalQuality.totalLinks}`
+      );
+    }
 
     // ── REDIRECT SCOPE CHECK — final rendered URL must remain on rootHost ──────
     // A server-side redirect may navigate the browser to a different hostname.
@@ -448,13 +961,17 @@ export async function runAnalysis({
       };
     }
 
-    console.log(`[phase1]  ${allNodes.length} kept | ${droppedNodes.length} dropped | ${
+    console.log(`[phase1]  ${nodeResult.nodes.length} kept | ${nodeResult.droppedNodes.length} dropped | ${
       (pageLinks.anchors?.length ?? 0) + (pageLinks.areas?.length ?? 0) + (pageLinks.formActions?.length ?? 0)
     } raw links`);
 
     // ── Functional category classification ────────────────────────────────────
     // Runs in Node.js space using already-extracted node metadata.
     // Adds: functionalCategory, functionalCategoryCode, labelColor, categoryReason
+    // Re-alias after potential retry patch so downstream uses fresh arrays.
+    const allNodes             = nodeResult.nodes;
+    const droppedNodes         = nodeResult.droppedNodes;
+    const visibilityMismatches = nodeResult.visibilityMismatches ?? [];
     classifyNodes(allNodes);
     console.log('[phase1]  functional categories classified');
 
@@ -548,6 +1065,22 @@ export async function runAnalysis({
     const allCandidates = await findTriggerCandidates(
       basePage, autoDynamicRegions, CONFIG.AUTO_DYNAMIC_OVERLAP_THRESHOLD);
 
+    // ── Tiered probe assignment + representative sampling ──────────────────────
+    // 1. Assign probe tier (deep / standard / lightweight) based on priority score
+    // 2. Group by structural signature; sample up to MAX_TRIGGER_REPS_PER_GROUP
+    //    representatives per group (auth-sensitive candidates are never dropped)
+    // 3. Apply absolute ceiling MAX_TRIGGERS after sampling
+    //
+    // This avoids running 30+ identical nav-bar buttons or repeated card buttons
+    // that all produce the same navigation-away result and waste 5–20 s each.
+    assignProbeTiers(allCandidates);
+    const sampledCandidates = groupAndSampleCandidates(allCandidates, {
+      maxGroups:   CONFIG.MAX_TRIGGER_GROUPS_PER_PAGE,
+      maxPerGroup: CONFIG.MAX_TRIGGER_REPS_PER_GROUP,
+    });
+    const candidates = sampledCandidates.slice(0, CONFIG.MAX_TRIGGERS);
+    const droppedByGroupSampling = allCandidates.length - sampledCandidates.length;
+
     // Write auto-dynamic-regions.json (after findTriggerCandidates so
     // excludedTriggerCount values are fully populated).
     await writeJson(path.join(outDir, 'auto-dynamic-regions.json'), {
@@ -560,16 +1093,21 @@ export async function runAnalysis({
     if (autoDynamicRegions.length) {
       console.log(`[phase1]  ${autoDynamicRegions.length} auto-dynamic region(s) excluded from trigger exploration`);
     }
-    const candidates    = allCandidates.slice(0, CONFIG.MAX_TRIGGERS);
-    console.log(`[phase1]  ${allCandidates.length} candidates | exploring top ${candidates.length}`);
+    console.log(
+      `[phase1]  ${allCandidates.length} raw candidates` +
+      ` | −${droppedByGroupSampling} group-sampled` +
+      ` | ${candidates.length} selected for exploration`
+    );
     await writeJson(path.join(outDir, 'trigger-candidates.json'), allCandidates);
     await baseCtx.close();
 
-    console.log(`[phase1]  running trigger exploration … (workers=${effectiveMaxTriggerWorkers} mode=${CONFIG.TRIGGER_SCREENSHOT_MODE})`);
+    console.log(`[phase1]  running trigger exploration … (workers=${effectiveMaxTriggerWorkers} mode=${CONFIG.TRIGGER_SCREENSHOT_MODE} screenshotPolicy=${CONFIG.TRIGGER_SCREENSHOT_POLICY})`);
     const { results: triggerResults, metrics: triggerMetrics } = await runTriggersParallel(
       browser, requestUrl, candidates, outDir, {
         maxWorkers:                      effectiveMaxTriggerWorkers,
         screenshotMode:                  CONFIG.TRIGGER_SCREENSHOT_MODE,
+        screenshotPolicy:                CONFIG.TRIGGER_SCREENSHOT_POLICY,
+        triggerMinDeltaScore:            CONFIG.TRIGGER_MIN_DELTA_SCORE,
         fallbackToFullPageOnClipFailure: true,
         autoDynamicRegions,
         autoDynamicOverlapThreshold:     CONFIG.AUTO_DYNAMIC_OVERLAP_THRESHOLD,
@@ -611,6 +1149,12 @@ export async function runAnalysis({
 
     const authSensitiveTriggerCount = allCandidates.filter((c) => c.authSensitiveHint).length;
 
+    // Collect defense state before closing context (page.evaluate may fail if locked+navigated)
+    const finalDefenseState = navDefenseApplied ? (await getDefenseState(basePage)) : null;
+    if (finalDefenseState) {
+      blockedNavigationCount += finalDefenseState.blocked;
+    }
+
     const phase1Summary = {
       // ── Raw vs. labeled node counts ─────────────────────────────────────────
       rawNodeCount:                     allNodes.length,
@@ -651,6 +1195,10 @@ export async function runAnalysis({
         stabilizationSucceeded: stabResult.stabilizationSucceeded,
         partiallyBlocked:      stabResult.partiallyBlocked,
       },
+      // ── PART 5+6: Evaluate degradation flags ─────────────────────────────
+      // Records whether each major page.evaluate() call was degraded due to
+      // execution-context destruction or SPA navigation mid-evaluate.
+      evaluateDegradation,
     };
 
     console.log('[phase1] ── complete ──────────────────────────');
@@ -983,7 +1531,16 @@ export async function runAnalysis({
     console.log('[phase3] ── complete ──────────────────────────');
 
     // ── 7. Mark input node as fully analyzed ─────────────────────────────────
-    markNodeAnalyzed(graph, inputIdentity.dedupKey, 'success');
+    // PART 7: Use the quality-gate result to set the graph analysis status.
+    // Never write 'success' when DOM extraction was empty due to context destruction.
+    const currentPageStatus = finalQuality.phase1QualityState;
+    const graphStatusWritten = currentPageStatus;
+    markNodeAnalyzed(graph, inputIdentity.dedupKey, currentPageStatus, {
+      domNodeCount:                    finalQuality.rawNodeCount,
+      linkCount:                       finalQuality.totalLinks,
+      degradedBecauseContextDestroyed: finalQuality.emptyResultCause === 'empty_due_to_context_destruction',
+    });
+    console.log(`[graph]  marked analyzed — status=${currentPageStatus} nodes=${finalQuality.rawNodeCount} links=${finalQuality.totalLinks}`);
 
     // ── 8. Write graph snapshot ───────────────────────────────────────────────
     // Graph is per-request (in-memory only). saveGraph no longer exists.
@@ -999,7 +1556,7 @@ export async function runAnalysis({
       jobId,
       startedAt,
       finishedAt,
-      currentPageStatus: 'analyzed_new_page',
+      currentPageStatus,
 
       // ── Input URLs and scope validation ───────────────────────────────────
       input:  { originalUrl, requestUrl },
@@ -1018,9 +1575,92 @@ export async function runAnalysis({
         finalUrl,
         hostname:         inputIdentity.hostname,
         normalizedPath:   inputIdentity.normalizedPath,
+        displayPath:      inputIdentity.displayPath ?? inputIdentity.normalizedPath,
         dedupKey:         inputIdentity.dedupKey,
         nodeId:           inputNode.nodeId,
         graphNodeCreated: inputNodeCreated,
+      },
+
+      // ── PART 7+9: SPA post-auth stability + quality report ────────────────────
+      // Records the full history of how the page was opened, whether auth
+      // context separation was used, whether the defense locked successfully,
+      // and what the URL settled to before analysis ran.
+      spaStability: {
+        // Whether this page was opened with an authenticated storageState
+        authContextUsed:                 postAuthMode,
+        storageStateApplied:             postAuthMode,
+        // Whether the addInitScript navigation defense was installed
+        navigationDefenseEnabled:        navDefenseEnabled,
+        // Whether the defense was successfully locked before DOM extraction
+        navigationDefenseLocked:         navDefenseApplied,
+        // Number of navigation attempts suppressed by the JS-level defense
+        // (pushState, location.assign, etc.) after the lock was activated
+        blockedNavigationCountJsLevel:   finalDefenseState?.blocked ?? 0,
+        // Number of navigation attempts suppressed by the network-level route()
+        blockedNavigationCountNetwork:   blockedNavigationCount - (finalDefenseState?.blocked ?? 0),
+        blockedNavigationTotal:          blockedNavigationCount,
+        // Whether a second-pass re-entry to the settled URL was performed
+        analysisRetriedAfterAuth:        analysisContextReused,
+        // Whether post-auth URL stability check succeeded within time budget
+        postAuthStabilizationSucceeded:  postAuthStabilizationResult?.stable ?? null,
+        postAuthStabilizationWaitedMs:   postAuthStabilizationResult?.waitedMs ?? null,
+        postAuthUrlChanges:              postAuthStabilizationResult?.urlChanges ?? null,
+        postAuthStabilizationReason:     postAuthStabilizationResult?.reason ?? null,
+        // The URL the page finally settled on before DOM analysis ran
+        finalEffectiveAnalysisUrl,
+        // Whether any page.evaluate() call fell back to empty due to context destruction
+        degradedBecauseContextDestroyed: finalQuality.emptyResultCause === 'empty_due_to_context_destruction',
+        degradedBecausePostAuthUnstable: postAuthMode && finalQuality.phase1QualityState === 'post_auth_unstable',
+        evaluateDegradation,
+        // PART 2: Post-auth DOM readiness probe result
+        postAuthDomProbe: postAuthDomProbeResult
+          ? {
+              ready:           postAuthDomProbeResult.ready,
+              score:           postAuthDomProbeResult.score,
+              waitedMs:        postAuthDomProbeResult.waitedMs,
+              passedSignals:   postAuthDomProbeResult.passedSignals,
+              failedSignals:   postAuthDomProbeResult.failedSignals,
+              evaluateFailures:postAuthDomProbeResult.evaluateFailures,
+              reason:          postAuthDomProbeResult.reason,
+            }
+          : null,
+        // PART 5: URL and time tracking — screenshot vs DOM extraction
+        screenshotCapturedAtUrl,
+        screenshotCapturedAtTime,
+        staticNodesExtractedAtUrl,
+        staticNodesExtractedAtTime,
+        linksExtractedAtUrl,
+        linksExtractedAtTime,
+        screenshotDomUrlDrift: screenshotCapturedAtUrl && staticNodesExtractedAtUrl &&
+          screenshotCapturedAtUrl !== staticNodesExtractedAtUrl
+            ? `screenshot@${screenshotCapturedAtUrl} vs DOM@${staticNodesExtractedAtUrl}`
+            : null,
+        // PART 3: Analysis retry tracking
+        analysisRetryAttempted,
+        analysisRetrySucceeded,
+        analysisRetryImprovedNodeCount,
+        // PART 6+1: Quality gate fields
+        phase1QualityState:       finalQuality.phase1QualityState,
+        domExtractionSucceeded:   finalQuality.domExtractionSucceeded,
+        linksExtractionSucceeded: finalQuality.linksExtractionSucceeded,
+        emptyResultCause:         finalQuality.emptyResultCause,
+        // PART 7: graph status fields
+        graphStatusWritten,
+        graphStatusShouldBe:      finalQuality.phase1QualityState,
+        // Human-readable quality note explaining what happened
+        analysisQualityNote:             analysisQualityNote ??
+          (postAuthMode
+            ? 'login succeeded; analysis ran in a fresh authenticated context with navigation defense'
+            : null),
+        // PART 9: human-readable notes for specific failure patterns
+        humanReadableNotes: _buildHumanReadableNotes({
+          phase1QualityState:    finalQuality.phase1QualityState,
+          screenshotExists,
+          analysisRetryAttempted,
+          analysisRetrySucceeded,
+          emptyResultCause:      finalQuality.emptyResultCause,
+          postAuthMode,
+        }),
       },
 
       // ── Phase 1 artifacts (VLM-ready outputs preserved) ────────────────────
@@ -1038,6 +1678,7 @@ export async function runAnalysis({
           triggerId: c.triggerId, action: c.triggerType, text: c.text,
           role: c.role, selectorHint: c.selectorHint, bbox: c.bbox,
           priority: c.priority, reason: c.reason,
+          probeMode: c.probeMode ?? null,
           authSensitiveHint: c.authSensitiveHint ?? false,
         })),
         triggerResults,
@@ -1134,7 +1775,7 @@ export async function runAnalysis({
 
     return {
       outputPath:        outDir,
-      currentPageStatus: 'analyzed_new_page',
+      currentPageStatus,   // analyzed_new_page | context_destroyed_mid_analysis | auth_succeeded_but_post_auth_unstable
       originalUrl,
       requestUrl,
       rootHost,
@@ -1151,6 +1792,10 @@ export async function runAnalysis({
         finalUrl,
         nodeId:           inputNode.nodeId,
         dedupKey:         inputIdentity.dedupKey,
+        // displayPath: human-readable decoded path, safe for graph labels and UI.
+        // Never use internalPageId or artifactSafeName as a display label.
+        normalizedPath:   inputIdentity.normalizedPath,
+        displayPath:      inputIdentity.displayPath ?? inputIdentity.normalizedPath,
         graphNodeCreated: inputNodeCreated,
       },
       summary: {
@@ -1179,6 +1824,144 @@ export async function runAnalysis({
 async function writeJson(filePath, data) {
   await fs.writeFile(filePath, JSON.stringify(data, null, 2), 'utf8');
 }
+
+/**
+ * PART 1+6+8: Compute the Phase 1 quality classification.
+ *
+ * Visual page availability and successful structural analysis are not the same
+ * thing.  A screenshot can exist even when the DOM extraction pipeline has
+ * failed entirely due to context destruction or post-auth instability.
+ *
+ * Quality states (ordered best → worst):
+ *   analyzed_successfully          — DOM extracted, nodes + links present, no degradation
+ *   analyzed_partially             — some extraction succeeded, some failed
+ *   screenshot_only_no_dom         — screenshot exists but DOM was empty (render not ready yet)
+ *   context_destroyed_mid_analysis — V8 context destroyed during extraction
+ *   post_auth_unstable             — post-auth page never stabilized enough to extract DOM
+ *   failed_analysis                — catastrophic failure, nothing extracted
+ *
+ * Empty result causes (PART 8):
+ *   empty_due_to_context_destruction   — extraction threw NavigationContext errors
+ *   empty_due_to_post_auth_instability — post-auth SPA kept redirecting
+ *   empty_due_to_render_not_ready      — screenshot exists, no context error, page just not rendered
+ *   empty_due_to_no_meaningful_nodes   — extraction ran but produced nothing (all filtered)
+ *
+ * @param {{ evaluateDegradation, allNodes, pageLinks, screenshotExists, postAuthMode }} opts
+ * @returns {{ phase1QualityState, domExtractionSucceeded, linksExtractionSucceeded,
+ *             rawNodeCount, totalLinks, emptyResultCause }}
+ */
+function _computePhase1Quality({ evaluateDegradation, allNodes, pageLinks, screenshotExists, postAuthMode }) {
+  const rawNodeCount  = allNodes?.length ?? 0;
+  const totalLinks    = (pageLinks?.anchors?.length ?? 0) +
+                        (pageLinks?.areas?.length ?? 0) +
+                        (pageLinks?.formActions?.length ?? 0);
+  const anyDegraded   = Object.values(evaluateDegradation).some((v) => v.degraded);
+  const nodesDegraded = evaluateDegradation?.extractStaticNodes?.degraded === true;
+  const linksDegraded = evaluateDegradation?.getPageLinks?.degraded === true;
+
+  let phase1QualityState;
+  let emptyResultCause = null;
+
+  if (rawNodeCount === 0 && totalLinks === 0) {
+    // Complete extraction failure — classify why
+    if (nodesDegraded) {
+      if (postAuthMode) {
+        phase1QualityState = 'post_auth_unstable';
+        emptyResultCause   = 'empty_due_to_post_auth_instability';
+      } else {
+        phase1QualityState = 'context_destroyed_mid_analysis';
+        emptyResultCause   = 'empty_due_to_context_destruction';
+      }
+    } else if (screenshotExists) {
+      // Screenshot exists, no context error — page was visible but DOM was empty
+      // (aggressive CSP, skeleton loaders, JS not done mounting, etc.)
+      phase1QualityState = 'screenshot_only_no_dom';
+      emptyResultCause   = 'empty_due_to_render_not_ready';
+    } else {
+      // Nothing at all — complete failure
+      phase1QualityState = 'failed_analysis';
+      emptyResultCause   = 'empty_due_to_no_meaningful_nodes';
+    }
+  } else if (rawNodeCount > 0 && !anyDegraded) {
+    // Clean extraction with all signals passing
+    phase1QualityState = 'analyzed_successfully';
+  } else if (rawNodeCount > 0 || totalLinks > 0) {
+    // Partial success — some steps degraded but we got something
+    phase1QualityState = 'analyzed_partially';
+    if (nodesDegraded || linksDegraded) {
+      emptyResultCause = 'empty_due_to_context_destruction';
+    }
+  } else {
+    phase1QualityState = 'failed_analysis';
+    emptyResultCause   = 'empty_due_to_no_meaningful_nodes';
+  }
+
+  return {
+    phase1QualityState,
+    domExtractionSucceeded:   rawNodeCount > 0,
+    linksExtractionSucceeded: totalLinks > 0,
+    rawNodeCount,
+    totalLinks,
+    emptyResultCause,
+  };
+}
+
+/**
+ * PART 9: Build human-readable notes for the final-report.json.
+ * Returns an array of plain English strings describing what happened.
+ *
+ * @param {{ phase1QualityState, screenshotExists, analysisRetryAttempted,
+ *           analysisRetrySucceeded, emptyResultCause, postAuthMode }} opts
+ * @returns {string[]}
+ */
+function _buildHumanReadableNotes({ phase1QualityState, screenshotExists,
+  analysisRetryAttempted, analysisRetrySucceeded, emptyResultCause, postAuthMode }) {
+  const notes = [];
+
+  switch (phase1QualityState) {
+    case 'analyzed_successfully':
+      notes.push('Phase 1 analysis completed successfully — DOM, links, and structural data extracted.');
+      break;
+    case 'analyzed_partially':
+      notes.push('Phase 1 analysis partially succeeded — some extraction steps degraded, but data was recovered.');
+      break;
+    case 'screenshot_only_no_dom':
+      notes.push('Baseline screenshot was captured, but DOM extraction failed — the page was visually loaded but the DOM was empty or not ready.');
+      notes.push('This may indicate aggressive CSP, skeleton-loader patterns, or JS mounting not yet complete at extraction time.');
+      break;
+    case 'context_destroyed_mid_analysis':
+      notes.push('Baseline screenshot was captured, but DOM extraction failed due to execution context destruction.');
+      notes.push('The SPA navigation defense was active, but the V8 context was destroyed before or during page.evaluate() calls.');
+      break;
+    case 'post_auth_unstable':
+      notes.push('Post-auth SPA navigation caused instability that prevented DOM extraction.');
+      notes.push('The page appeared to navigate repeatedly after login, preventing a stable evaluate window.');
+      break;
+    case 'failed_analysis':
+      notes.push('Analysis failed catastrophically — no screenshot, no DOM data, and no links were extracted.');
+      break;
+  }
+
+  if (screenshotExists && ['context_destroyed_mid_analysis', 'post_auth_unstable', 'screenshot_only_no_dom'].includes(phase1QualityState)) {
+    notes.push('The existence of a baseline screenshot does NOT mean the page was successfully analyzed — DOM extraction failed independently.');
+  }
+
+  if (analysisRetryAttempted) {
+    if (analysisRetrySucceeded) {
+      notes.push('Analysis was retried once in a fresh authenticated context — retry improved the DOM extraction result.');
+    } else {
+      notes.push('Analysis was retried once in a fresh authenticated context — retry did not improve the result.');
+    }
+  }
+
+  if (postAuthMode && ['context_destroyed_mid_analysis', 'post_auth_unstable'].includes(phase1QualityState)) {
+    notes.push('Page was marked partial/failed instead of success because structural DOM was empty despite a valid authenticated session.');
+  }
+
+  return notes;
+}
+
+
 
 /**
  * Select up to `limit` nodes from `allNodes` for baseline annotation,

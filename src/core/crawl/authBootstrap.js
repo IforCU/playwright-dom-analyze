@@ -155,7 +155,10 @@ async function _isAuthRequired(page, rootHost) {
     };
   }
 
-  // Body keyword alone is a weak signal — require at least 2 hits or an email field
+  // Body keyword alone is a weak signal — require email input OR very high keyword density
+  // on a page with very few outbound links.
+  // Portal homepages (e.g. naver.com, daum.net) have "로그인" in their nav but are NOT
+  // login walls — they typically have hundreds of outbound links.
   if (bodyHasAuthKeyword) {
     const hasEmailInput = await page
       .locator('input[type="email"], input[autocomplete="email"], input[name="email"]')
@@ -167,8 +170,11 @@ async function _isAuthRequired(page, rootHost) {
         loginUrl: currentUrl,
       };
     }
+    // Only treat as auth wall when keyword density is high AND the page has
+    // very few links (login-only pages have minimal navigation).
     const keywordHits = AUTH_BODY_KEYWORDS.filter((kw) => bodyLower.includes(kw.toLowerCase())).length;
-    if (keywordHits >= 3) {
+    const linkCount   = await page.locator('a[href]').count().catch(() => 999);
+    if (keywordHits >= 5 && linkCount < 25) {
       return {
         required: true,
         reason:   'multiple_auth_body_keywords',
@@ -309,12 +315,37 @@ export async function runPreAuthBootstrap({
       return result;
     }
 
-    // ── Step 4: Perform login ─────────────────────────────────────────────────
+    // ── Step 4: Resolve actual login page ────────────────────────────────────
+    // If the landing page has no login form (e.g. portal homepage detected by
+    // keyword signal), try to navigate to a login link before attempting login.
+    // This handles sites like Naver where the login form lives on a sub-host
+    // (nid.naver.com) reachable via a nav link.
+    const hasLoginForm = await _hasLoginForm(page);
+    if (!hasLoginForm) {
+      console.log('[authBootstrap] no login form on landing page — searching for login link …');
+      const loginLink = await _findLoginNavLink(page, authHints?.loginUrlPattern ?? null);
+      if (loginLink) {
+        console.log(`[authBootstrap] navigating to login link: ${loginLink}`);
+        try {
+          await page.goto(loginLink, { waitUntil: 'load', timeout: 15_000 });
+          await _stabilize(page, 5_000);
+          const newUrl = page.url();
+          console.log(`[authBootstrap] login page loaded: ${newUrl}`);
+          result.preAuthLoginUrl = newUrl;
+        } catch (navErr) {
+          console.log(`[authBootstrap] login link navigation failed: ${navErr.message}`);
+        }
+      } else {
+        console.log('[authBootstrap] no login link found — login attempt may fail');
+      }
+    }
+
+    // ── Step 5: Perform login ─────────────────────────────────────────────────
     result.preAuthAttempted = true;
 
     let authHostForLog;
     try {
-      authHostForLog = new URL(detection.loginUrl).hostname;
+      authHostForLog = new URL(page.url()).hostname;
     } catch {
       authHostForLog = 'unknown';
     }
@@ -346,7 +377,8 @@ export async function runPreAuthBootstrap({
     console.error(`[authBootstrap] unexpected error: ${err.message}`);
     result.preAuthFailed  = true;
     result.preAuthReason  = `error:${err.message}`;
-    result.stopReason     = 'pre_auth_bootstrap_error';
+    // Non-fatal: BFS will proceed unauthenticated
+    result.stopReason     = null;
     return result;
 
   } finally {
@@ -355,4 +387,63 @@ export async function runPreAuthBootstrap({
     if (ctx) await ctx.close().catch(() => {});
     console.log('[authBootstrap] ──────────────────────────────────────────────\n');
   }
+}
+
+// ── Internal helpers ──────────────────────────────────────────────────────────
+
+/**
+ * Returns true if the current page has a visible login form
+ * (password input OR common username/email input).
+ */
+async function _hasLoginForm(page) {
+  const hasPassword = await page
+    .locator('input[type="password"]')
+    .count().then((n) => n > 0).catch(() => false);
+  if (hasPassword) return true;
+
+  const hasUserField = await page
+    .locator(
+      'input[type="email"], input[autocomplete="email"], ' +
+      'input[autocomplete="username"], input[name="email"], ' +
+      'input[name="username"], input[name="id"], input[name="loginId"]',
+    )
+    .count().then((n) => n > 0).catch(() => false);
+  return hasUserField;
+}
+
+/**
+ * Scan the page for anchor links that point to a likely login page.
+ * Returns the first matching href, or null if none found.
+ *
+ * @param {import('playwright').Page} page
+ * @param {string|null} hintPattern  - optional substring from authHints.loginUrlPattern
+ */
+async function _findLoginNavLink(page, hintPattern) {
+  return page.evaluate((hint) => {
+    const LOGIN_PATTERNS = [
+      /\/login/i, /\/signin/i, /\/sign[-_]in/i,
+      /\/auth(?:\/|$)/i, /\/oauth/i, /\/sso/i,
+      /\/member.*login/i, /login.*\.do/i,
+      // Common Korean auth sub-hosts
+      /nid\./i, /accounts\./i, /id\./i, /passport\./i,
+    ];
+
+    const anchors = Array.from(document.querySelectorAll('a[href]'));
+    const candidates = [];
+
+    for (const a of anchors) {
+      const href = a.href || '';
+      if (!href.startsWith('http')) continue;
+
+      // Prefer hint pattern when provided
+      if (hint && href.includes(hint)) return href;
+
+      if (LOGIN_PATTERNS.some((p) => p.test(href))) {
+        candidates.push(href);
+      }
+    }
+
+    // Deduplicate and return first
+    return candidates[0] ?? null;
+  }, hintPattern).catch(() => null);
 }

@@ -226,9 +226,15 @@ export function buildGraphData(graph, finalReport, originalUrl) {
     const pageResult  = pageResultMap.get(dk);
     const depth       = pageResult?.depth ?? bfsDepths.get(dk) ?? -1;
     const status      = resolveNodeStatus(dk, startDedupKey, gNode, pageResult);
-    // Decode percent-encoded path segments so Korean/CJK characters are readable
-    const rawPath = gNode.normalizedPath ?? '/';
-    const p = (() => { try { return decodeURIComponent(rawPath); } catch { return rawPath; } })();
+
+    // displayPath: human-readable label for this node.
+    // Priority: gNode.displayPath (set at crawl-time from computePageIdentity)
+    //   > decoded normalizedPath (fallback for older snapshots)
+    //   > raw normalizedPath
+    //   > '/'
+    // NEVER use dedupKey, nodeId, or artifactSafeName as the display label.
+    const rawDisplay  = gNode.displayPath ?? gNode.normalizedPath ?? '/';
+    const p = (() => { try { return decodeURIComponent(rawDisplay); } catch { return rawDisplay; } })();
     const ph1         = pageResult?.phase1Summary ?? null;
 
     // Rich tooltip (HTML shown on hover in the interactive graph)
@@ -246,20 +252,21 @@ export function buildGraphData(graph, finalReport, originalUrl) {
       pageResult?.error ? `<br/><span style="color:#e74c3c">⚠ ${escHtml(String(pageResult.error).slice(0, 120))}</span>` : null,
     ].filter(Boolean).join('<br/>');
 
-    const shortPath = p.length > 28 ? p.slice(0, 25) + '…' : p;
+    const shortPath = p.length > 40 ? p.slice(0, 37) + '…' : p;
 
     nodes.push({
       id:               dk,
       nodeId:           gNode.nodeId,
       hostname:         gNode.hostname,
-      normalizedPath:   p,
+      normalizedPath:   gNode.normalizedPath ?? '/',
+      displayPath:      p,             // human-readable label — decoded, never an internal id
       dedupKey:         dk,
       depth,
       status,
       authGated:        gNode.authGated ?? false,
       analyzed:         gNode.analyzed  ?? false,
       representativeUrl: gNode.representativeUrl ?? null,
-      label:            shortPath,
+      label:            shortPath,     // shown in graph nodes (displayPath, possibly truncated)
       depthLabel:       depth >= 0 ? `d${depth}` : '?',
       tooltip:          tooltipLines,
       phase1Summary:    ph1,
@@ -404,9 +411,10 @@ export function buildGraphData(graph, finalReport, originalUrl) {
 
 function mmdNodeDef(node) {
   const id   = mmdId(node.id);
-  const rawP = node.normalizedPath;
-  const p    = (() => { try { return decodeURIComponent(rawP); } catch { return rawP; } })();
-  const pDisp = p.length > 32 ? p.slice(0, 29) + '...' : p;
+  // Use displayPath (already decoded, human-readable) for Mermaid labels.
+  // Never use node.id (dedupKey) or internal artifact names.
+  const p     = node.displayPath ?? node.normalizedPath ?? '/';
+  const pDisp = p.length > 36 ? p.slice(0, 33) + '...' : p;
   const line2 = `${node.status}${node.depth >= 0 ? ' · d' + node.depth : ''}`;
   const label = `${pDisp}<br/><small>${line2}</small>`;
 
@@ -571,7 +579,7 @@ export function generateHtml(graphData) {
   // ── Build D3-ready node / edge data ────────────────────────────────────────
   const nodesSrc = nodes.map((n) => ({
     id:               n.id,
-    label:            n.label,
+    label:            n.label,          // displayPath (possibly truncated) — shown on node
     depthLabel:       n.depthLabel,
     depth:            n.depth >= 0 ? n.depth : 0,
     status:           n.status,
@@ -579,6 +587,7 @@ export function generateHtml(graphData) {
     representativeUrl: n.representativeUrl ?? null,
     hostname:         n.hostname ?? '',
     normalizedPath:   n.normalizedPath ?? '/',
+    displayPath:      n.displayPath ?? n.normalizedPath ?? '/',  // human-readable path
     color:            STATUS_FILL[n.status]   ?? STATUS_FILL.unknown,
     strokeColor:      STATUS_BORDER[n.status] ?? STATUS_BORDER.unknown,
     // Visual radius per status

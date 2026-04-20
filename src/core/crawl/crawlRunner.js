@@ -288,14 +288,18 @@ export async function runCrawl({ jobId, originalUrl, requestUrl = null, crawlOpt
         console.log('[crawl] pre-auth bootstrap failed — BFS will proceed unauthenticated');
       }
 
-      // Hard stop: auth was required but login failed or no credentials given
-      if (bootstrapResult.stopReason === 'auth_required_no_credentials' ||
-          bootstrapResult.stopReason === 'pre_auth_bootstrap_failed'    ||
-          bootstrapResult.stopReason === 'pre_auth_bootstrap_error') {
+      // Hard stop: auth is required and NO credentials exist — cannot proceed at all.
+      // For all other bootstrap outcomes (login attempt failed, error, etc.) we
+      // continue BFS unauthenticated so public pages are still crawled.
+      if (bootstrapResult.stopReason === 'auth_required_no_credentials') {
         stopReason = bootstrapResult.stopReason;
-        console.log(`[crawl] stopping before BFS — ${stopReason}`);
+        console.log('[crawl] stopping before BFS — auth required but no credentials provided');
         // Skip the BFS entirely; fall through to finally + report
         currentFrontier = [];
+      } else if (bootstrapResult.stopReason) {
+        // Bootstrap failed for another reason (login attempt failed, error, etc.)
+        // Log it but let BFS proceed — unauthenticated crawl is still useful.
+        console.log(`[crawl] pre-auth bootstrap: ${bootstrapResult.stopReason} — continuing BFS unauthenticated`);
       }
     }
 
@@ -381,22 +385,36 @@ export async function runCrawl({ jobId, originalUrl, requestUrl = null, crawlOpt
 
         if (error) {
           console.error(`[crawl] page ${url} FAILED: ${error.message}`);
+          console.error(`[crawl]   stack: ${error.stack ?? '(no stack)'}`);
           pageCountFailed++;
           pageResults.push({
-            pageIndex:   bIdx,
+            pageIndex:       bIdx,
             url,
             depth,
-            status:      'failed',
-            dedupKey:    identity.dedupKey,
-            artifactDir: toRelPath('outputs', jobId, 'pages', pageSlug),
-            error:       error.message,
+            status:          'failed',
+            dedupKey:        identity.dedupKey,
+            // internalPageId / artifactSafeName: machine-oriented identifiers.
+            // Not intended for display in graph labels or UI — use node.displayPath instead.
+            internalPageId:  pageSlug,
+            artifactSafeName: pageSlug,
+            artifactDir:     toRelPath('outputs', jobId, 'pages', pageSlug),
+            error:           error.message,
             startedAt, finishedAt, durationMs, workerSlot,
           });
           continue;
         }
 
         switch (result.currentPageStatus) {
-          case 'analyzed_new_page':
+          case 'analyzed_new_page':        // legacy — kept for backward compat
+          case 'analyzed_successfully':
+          case 'analyzed_partially':
+          case 'screenshot_only_no_dom':
+          case 'context_destroyed_mid_analysis':
+          case 'post_auth_unstable':
+          case 'auth_succeeded_but_post_auth_unstable':  // legacy alias
+            // All of the above mean "we attempted analysis and produced some output."
+            // Degraded results are still counted as analyzed so BFS can discover
+            // any URLs that were found (even from a partially empty DOM extraction).
             pageCountAnalyzed++;
             break;
           case 'skipped_existing_page':
@@ -405,6 +423,8 @@ export async function runCrawl({ jobId, originalUrl, requestUrl = null, crawlOpt
               pageIndex: bIdx, url, depth,
               status:     'skipped_prior_run',
               dedupKey:   identity.dedupKey,
+              internalPageId:  pageSlug,
+              artifactSafeName: pageSlug,
               artifactDir: toRelPath('outputs', jobId, 'pages', pageSlug),
               startedAt, finishedAt, durationMs, workerSlot,
             });
@@ -417,6 +437,8 @@ export async function runCrawl({ jobId, originalUrl, requestUrl = null, crawlOpt
               pageIndex: bIdx, url, depth,
               status:     result.currentPageStatus,
               dedupKey:   identity.dedupKey,
+              internalPageId:  pageSlug,
+              artifactSafeName: pageSlug,
               reason:     result.reason ?? null,
               artifactDir: toRelPath('outputs', jobId, 'pages', pageSlug),
               startedAt, finishedAt, durationMs, workerSlot,
@@ -466,9 +488,13 @@ export async function runCrawl({ jobId, originalUrl, requestUrl = null, crawlOpt
           pageIndex:       bIdx,
           url,
           depth,
-          status:          'analyzed',
+          status:          result.currentPageStatus,  // analyzed_successfully | analyzed_partially | screenshot_only_no_dom | context_destroyed_mid_analysis | post_auth_unstable | failed_analysis
           dedupKey:        identity.dedupKey,
           nodeId:          result.inputPage?.nodeId ?? null,
+          // internalPageId / artifactSafeName: machine-oriented artifact directory
+          // identifiers.  Not intended as display labels — use node.displayPath.
+          internalPageId:  pageSlug,
+          artifactSafeName: pageSlug,
           artifactDir:     toRelPath('outputs', jobId, 'pages', pageSlug),
           phase1Summary:   result.summary?.phase1 ?? null,
           nextQueueCount:  enqueuedThis,

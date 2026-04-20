@@ -42,7 +42,7 @@ import { randomUUID } from 'crypto';
  *   - preserves path case
  *
  * @param {string} rawUrl
- * @returns {{ hostname: string, normalizedPath: string, dedupKey: string }|null}
+ * @returns {{ hostname: string, normalizedPath: string, displayPath: string, dedupKey: string }|null}
  */
 export function computePageIdentity(rawUrl) {
   if (!rawUrl || typeof rawUrl !== 'string') return null;
@@ -58,7 +58,17 @@ export function computePageIdentity(rawUrl) {
     const normalizedPath = p || '/';
     const dedupKey       = `${hostname}${normalizedPath}`;
 
-    return { hostname, normalizedPath, dedupKey };
+    // displayPath: human-readable path label for graph visualization and reports.
+    // Derived by percent-decoding the normalizedPath so Korean/CJK and other
+    // non-ASCII segments are readable in the UI instead of appearing as %ED%95...
+    // This is the ONLY field that should be used as a visible label — not
+    // dedupKey, not nodeId, not artifactSafeName.
+    const displayPath = (() => {
+      try { return decodeURIComponent(normalizedPath); }
+      catch { return normalizedPath; }
+    })();
+
+    return { hostname, normalizedPath, displayPath, dedupKey };
   } catch {
     return null;
   }
@@ -69,15 +79,19 @@ export function computePageIdentity(rawUrl) {
 /**
  * Create a new graph node representing a unique page.
  *
- * @param {{ hostname, normalizedPath, dedupKey, representativeUrl, jobId }} opts
+ * @param {{ hostname, normalizedPath, displayPath?, dedupKey, representativeUrl, jobId }} opts
  * @returns {object}
  */
-export function createNode({ hostname, normalizedPath, dedupKey, representativeUrl, jobId, authGated = false }) {
+export function createNode({ hostname, normalizedPath, displayPath, dedupKey, representativeUrl, jobId, authGated = false }) {
   const now = new Date().toISOString();
   return {
     nodeId:                 randomUUID(),
     hostname,
     normalizedPath,
+    // displayPath: human-readable label for graph visualization and reports.
+    // Must NOT be used as a storage key or dedup identifier.
+    // Fallback: decoded normalizedPath (covers nodes created before this field existed).
+    displayPath:            displayPath ?? (() => { try { return decodeURIComponent(normalizedPath); } catch { return normalizedPath; } })(),
     dedupKey,
     representativeUrl,
     discoveredVariants:     [representativeUrl],  // query/hash variants of the same path
@@ -86,7 +100,11 @@ export function createNode({ hostname, normalizedPath, dedupKey, representativeU
     discoveredByJobIds:     [jobId],
     analyzed:               false,                // true once Phase 1 has run for this page
     analyzedAt:             null,
-    analysisStatus:         null,                 // 'success' | 'failed'
+    analysisStatus:         null,                 // 'analyzed_successfully' | 'analyzed_partially' | 'screenshot_only_no_dom' | 'context_destroyed_mid_analysis' | 'post_auth_unstable' | 'failed_analysis'
+    analysisQuality:        null,                 // machine-readable quality tier (mirrors analysisStatus)
+    domNodeCount:           null,                 // rawNodeCount from Phase 1 (null = not analyzed)
+    linkCount:              null,                 // total links discovered (null = not analyzed)
+    degradedBecauseContextDestroyed: false,       // true when context destruction caused empty results
     lastReachabilityStatus: null,
     // true when this node represents an authentication page (login / consent)
     // rather than a normal content page.  authGated nodes are NOT enqueued for

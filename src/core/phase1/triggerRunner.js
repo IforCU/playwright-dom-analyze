@@ -91,6 +91,12 @@ const VIEWPORT_WIDTH = 1920;
 export async function runTrigger(browser, url, candidate, outDir, opts = {}) {
   const {
     screenshotMode                  = 'changedRegion',
+    // screenshotPolicy controls when screenshots are actually written:
+    //   'always'   — always write after-state screenshot
+    //   'on_delta' — only write if deltaLabelNodes.length >= triggerMinDeltaScore
+    //   'skip'     — never write screenshots for this run (lightweight probe)
+    screenshotPolicy                = 'on_delta',
+    triggerMinDeltaScore            = 1,
     fallbackToFullPageOnClipFailure = true,
     // Auto-dynamic region overlap filtering:
     // newNodes that overlap known auto-dynamic regions are treated as background
@@ -111,6 +117,10 @@ export async function runTrigger(browser, url, candidate, outDir, opts = {}) {
     // (cookies, localStorage) so authenticated pages behave correctly.
     storageStatePath                = null,
   } = opts;
+
+  // Derive screenshotPolicy from candidate probeMode if caller didn't force it
+  const effectiveScreenshotPolicy =
+    candidate.probeMode === 'lightweight' ? 'skip' : screenshotPolicy;
 
   // Derive rootHost from the page URL. requestUrl has already been validated
   // as being on rootHost before it reaches here, so this is always accurate.
@@ -369,16 +379,28 @@ export async function runTrigger(browser, url, candidate, outDir, opts = {}) {
     }, null, 2));
 
     // ── 7. Screenshots (mode-dependent) ───────────────────────────────────────
-    // Wait for visual rendering to be fully committed before capturing.
-    await _waitForVisualRender(page);
+    // Screenshot policy gating:
+    //   'always'   — always capture (expensive)
+    //   'on_delta' — capture only when meaningful DOM delta is detected
+    //   'skip'     — no screenshots (lightweight probe, e.g. low-priority tabindex elements)
+    const deltaCount = deltaLabelNodes.length;
+    const shouldScreenshot =
+      effectiveScreenshotPolicy === 'always' ||
+      (effectiveScreenshotPolicy === 'on_delta' && deltaCount >= triggerMinDeltaScore);
+
+    if (shouldScreenshot) {
+      await _waitForVisualRender(page);
+    }
     const afterPath     = path.join(resultsDir, `${triggerId}-after.png`);
     const annotatedPath = path.join(resultsDir, `${triggerId}-annotated.png`);
-    // Pass only deltaLabelNodes — NOT the full afterNodes list.
-    // Trigger-result annotations show only what the trigger changed.
-    await _captureAfterScreenshots(
-      page, deltaLabelNodes, afterPath, annotatedPath,
-      screenshotMode, fallbackToFullPageOnClipFailure,
-    );
+    if (shouldScreenshot) {
+      // Pass only deltaLabelNodes — NOT the full afterNodes list.
+      // Trigger-result annotations show only what the trigger changed.
+      await _captureAfterScreenshots(
+        page, deltaLabelNodes, afterPath, annotatedPath,
+        screenshotMode, fallbackToFullPageOnClipFailure,
+      );
+    }
 
     await context.close();
 
@@ -389,11 +411,13 @@ export async function runTrigger(browser, url, candidate, outDir, opts = {}) {
       action:               triggerType,
       status:               actionError ? 'failed' : 'success',
       screenshotMode,
-      beforeScreenshot:     screenshotMode === 'fullPage'
+      screenshotPolicy:     effectiveScreenshotPolicy,
+      probeMode:            candidate.probeMode ?? 'standard',
+      beforeScreenshot:     screenshotMode === 'fullPage' && shouldScreenshot
         ? _unix(path.join(relBase, `${triggerId}-before.png`))
         : null,
-      afterScreenshot:      _unix(path.join(relBase, `${triggerId}-after.png`)),
-      annotatedScreenshot:  _unix(path.join(relBase, `${triggerId}-annotated.png`)),
+      afterScreenshot:      shouldScreenshot ? _unix(path.join(relBase, `${triggerId}-after.png`)) : null,
+      annotatedScreenshot:  shouldScreenshot ? _unix(path.join(relBase, `${triggerId}-annotated.png`)) : null,
       diffDebug:            _unix(path.join(relBase, `${triggerId}-diff-debug.json`)),
       mutationCount:        mutations.length,
       mutations:            mutations.slice(0, 100),

@@ -42,7 +42,7 @@ export function findNode(graph, dedupKey) {
  * @param {{ hostname, normalizedPath, dedupKey, representativeUrl, jobId }} opts
  * @returns {{ node: object, created: boolean }}
  */
-export function upsertNode(graph, { hostname, normalizedPath, dedupKey, representativeUrl, jobId, authGated = false }) {
+export function upsertNode(graph, { hostname, normalizedPath, displayPath, dedupKey, representativeUrl, jobId, authGated = false }) {
   const existing = graph.nodes[dedupKey];
   if (existing) {
     existing.lastSeenAt = new Date().toISOString();
@@ -56,28 +56,45 @@ export function upsertNode(graph, { hostname, normalizedPath, dedupKey, represen
     if (authGated && !existing.authGated) {
       existing.authGated = true;
     }
+    // Backfill displayPath on older nodes that were created without it
+    if (!existing.displayPath && (normalizedPath || displayPath)) {
+      existing.displayPath = displayPath ?? (() => { try { return decodeURIComponent(normalizedPath); } catch { return normalizedPath; } })();
+    }
     return { node: existing, created: false };
   }
 
-  const node = createNode({ hostname, normalizedPath, dedupKey, representativeUrl, jobId, authGated });
+  const node = createNode({ hostname, normalizedPath, displayPath, dedupKey, representativeUrl, jobId, authGated });
   graph.nodes[dedupKey] = node;
   return { node, created: true };
 }
 
 /**
- * Mark a node as having been fully analyzed (Phase 1 complete).
- * Sets analyzed=true, analyzedAt, and analysisStatus.
+ * Mark a node as having been analyzed (Phase 1 complete).
+ * Sets analyzed, analyzedAt, analysisStatus, and quality metrics.
+ *
+ * analysisStatus values (ordered best → worst):
+ *   analyzed_successfully          — DOM extracted, nodes and links present
+ *   analyzed_partially             — some extraction succeeded, some failed
+ *   screenshot_only_no_dom         — screenshot exists but DOM was empty
+ *   context_destroyed_mid_analysis — V8 context destroyed during extraction
+ *   post_auth_unstable             — post-auth page never stabilized
+ *   failed_analysis                — extraction failed catastrophically
  *
  * @param {{ nodes: object }} graph
  * @param {string} dedupKey
- * @param {'success'|'failed'} [status='success']
+ * @param {string} [status='analyzed_successfully']
+ * @param {{ domNodeCount?: number, linkCount?: number, degradedBecauseContextDestroyed?: boolean }} [quality]
  */
-export function markNodeAnalyzed(graph, dedupKey, status = 'success') {
+export function markNodeAnalyzed(graph, dedupKey, status = 'analyzed_successfully', quality = {}) {
   const node = graph.nodes[dedupKey];
   if (!node) return;
   node.analyzed       = true;
   node.analyzedAt     = new Date().toISOString();
   node.analysisStatus = status;
+  node.analysisQuality = status;
+  if (quality.domNodeCount  != null) node.domNodeCount  = quality.domNodeCount;
+  if (quality.linkCount     != null) node.linkCount     = quality.linkCount;
+  if (quality.degradedBecauseContextDestroyed) node.degradedBecauseContextDestroyed = true;
 }
 
 /**

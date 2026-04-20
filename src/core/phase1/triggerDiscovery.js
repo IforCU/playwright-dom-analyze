@@ -37,7 +37,7 @@ import { AUTH_SENSITIVE_TEXT_HINTS }           from './authNavigationClassifier.
  * @returns {Promise<object[]>}  Sorted, filtered interactive candidate list
  */
 export async function findTriggerCandidates(page, autoDynamicRegions = [], overlapThreshold = 0.3) {
-  const rawCandidates = await page.evaluate(() => {
+  const rawCandidates = (await page.evaluate(() => {
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     function buildSelectorHint(el) {
@@ -330,7 +330,10 @@ export async function findTriggerCandidates(page, autoDynamicRegions = [], overl
     // Sort highest priority first
     candidates.sort((a, b) => b.priority - a.priority);
     return candidates;
-  });
+  }).catch((err) => {
+    console.log(`[phase1]  findTriggerCandidates: evaluate failed (context destroyed) — returning empty list`);
+    return [];
+  })) || [];
 
   if (!autoDynamicRegions.length) return _tagAuthSensitive(_dedupBySelectorHint(rawCandidates));
 
@@ -397,4 +400,91 @@ function _tagAuthSensitive(candidates) {
     c.authSensitiveHint = AUTH_SENSITIVE_TEXT_HINTS.some((kw) => txt.includes(kw.toLowerCase()));
   }
   return candidates;
+}
+
+// ── Probe tier assignment ─────────────────────────────────────────────────────
+//
+// Assigns a probeMode to each candidate so the runner can apply the right
+// cost level without needing to re-rank after sorting.
+//
+//   deep        — aria-expanded / haspopup / accordion / tab / modal triggers
+//                 High signal value; full exploration with screenshots.
+//   standard    — regular buttons, summaries, role=button, onclick
+//                 Normal exploration with changed-region screenshots.
+//   lightweight — tabindex-only, low-priority anchors, repeated clones
+//                 Fast probe: DOM delta only, no screenshots.
+//
+// Thresholds (priority scale defined by baseScore + bonus scoring in evaluate()):
+//   deep         priority >= 7
+//   standard     priority >= 3
+//   lightweight  priority <  3
+
+export function assignProbeTiers(candidates) {
+  for (const c of candidates) {
+    if (c.priority >= 7)       c.probeMode = 'deep';
+    else if (c.priority >= 3)  c.probeMode = 'standard';
+    else                       c.probeMode = 'lightweight';
+  }
+  return candidates;
+}
+
+// ── Representative group sampling ─────────────────────────────────────────────
+//
+// After dedup, many pages still have 30–60+ candidates — e.g. a navigation bar
+// with 20 dropdown buttons all sharing the same priority and selectorHint prefix.
+// Running each individually is wasteful: they produce equivalent results.
+//
+// Strategy:
+//   1. Group candidates by a "structural key" (tag + selectorHint prefix + probeMode)
+//   2. Keep up to MAX_PER_GROUP representatives from each group (highest priority first)
+//   3. Hard-cap total shortlist to maxGroups × MAX_PER_GROUP
+//
+// auth-sensitive candidates are never dropped — they always survive regardless
+// of their group quota, because they reveal security-sensitive flows.
+//
+// @param {object[]} candidates  - sorted by priority (desc)
+// @param {object}   opts
+// @param {number}   opts.maxGroups      - max number of distinct structural groups (default 12)
+// @param {number}   opts.maxPerGroup    - max representatives per group (default 3)
+// @returns {object[]}
+
+export function groupAndSampleCandidates(candidates, { maxGroups = 12, maxPerGroup = 3 } = {}) {
+  const GENERIC_TAGS = new Set(['a', 'button', 'input', 'div', 'span']);
+
+  function _structKey(c) {
+    const tag = c.selectorHint?.split('.')[0]?.split('#')[0] ?? 'el';
+    // For non-generic tags, the tag itself is the group key
+    if (!GENERIC_TAGS.has(tag)) return `${tag}_${c.probeMode}`;
+    // For generic tags, group by first class segment + probeMode
+    const cls = c.selectorHint?.split('.')[1] ?? '';
+    return `${tag}_${cls}_${c.probeMode}`;
+  }
+
+  const groupOrder  = [];  // insertion-order group keys
+  const groupCounts = new Map();
+  const result      = [];
+  const authSurvivors = candidates.filter((c) => c.authSensitiveHint);
+  const authSurvivorIds = new Set(authSurvivors.map((c) => c.triggerId));
+
+  for (const c of candidates) {
+    if (authSurvivorIds.has(c.triggerId)) {
+      result.push(c);
+      continue;
+    }
+    const key   = _structKey(c);
+    const count = groupCounts.get(key) ?? 0;
+
+    if (!groupCounts.has(key)) {
+      if (groupOrder.length >= maxGroups) continue;  // too many groups
+      groupOrder.push(key);
+    }
+    if (count >= maxPerGroup) continue;  // group quota exhausted
+
+    groupCounts.set(key, count + 1);
+    result.push(c);
+  }
+
+  // Preserve priority order within the sampled set
+  result.sort((a, b) => b.priority - a.priority);
+  return result;
 }

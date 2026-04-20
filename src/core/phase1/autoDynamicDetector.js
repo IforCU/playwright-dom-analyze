@@ -82,7 +82,7 @@ export async function detectAutoDynamicRegions(page, opts = {}) {
   // ── Reset mutations then observe passively ────────────────────────────────
   await resetMutations(page).catch(() => {});
   await page.waitForTimeout(observationMs);
-  const rawMutations = await getMutations(page).catch(() => []);
+  const rawMutations = (await getMutations(page).catch(() => [])) || [];
 
   console.log(`[autoDynamic]  observed ${rawMutations.length} passive mutation(s) over ${observationMs}ms`);
 
@@ -93,10 +93,13 @@ export async function detectAutoDynamicRegions(page, opts = {}) {
     minMutationCount: AUTO_MUTATION_MIN_COUNT,
     minW:             MIN_REGION_W,
     minH:             MIN_REGION_H,
+  }).catch((err) => {
+    console.log(`[autoDynamic]  evaluate failed (context likely destroyed) — using empty result`);
+    return [];
   });
 
-  console.log(`[autoDynamic]  ${regions.length} auto-dynamic region(s) detected`);
-  return regions;
+  console.log(`[autoDynamic]  ${(regions || []).length} auto-dynamic region(s) detected`);
+  return regions || [];
 }
 
 // ── In-page detection (serialised and evaluated inside Chrome) ────────────────
