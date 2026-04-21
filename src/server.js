@@ -11,6 +11,7 @@ import path from 'path';
 import analyzeRouter from './routes/analyze.js';
 import auditRouter  from './routes/audit.js';
 import crawlRouter  from './routes/crawl.js';
+import qaRouter     from './routes/qa.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -31,6 +32,7 @@ app.use('/outputs', express.static(path.join(__dirname, '..', 'outputs')));
 app.use('/', analyzeRouter);
 app.use('/', auditRouter);
 app.use('/', crawlRouter);
+app.use('/', qaRouter);
 
 const server = app.listen(PORT, () => {
   console.log(`[server] listening on http://localhost:${PORT}`);
@@ -38,6 +40,8 @@ const server = app.listen(PORT, () => {
   console.log(`[server] API     → POST http://localhost:${PORT}/analyze`);
   console.log(`[server] Crawl   → POST http://localhost:${PORT}/crawl`);
   console.log(`[server] Audit   → POST http://localhost:${PORT}/audit`);
+  console.log(`[server] QA Run  → POST http://localhost:${PORT}/qa/run`);
+  console.log(`[server] QA Val  → POST http://localhost:${PORT}/qa/validate`);
 });
 
 server.on('error', (err) => {

@@ -1,0 +1,127 @@
+{
+  "schemaVersion": "2.0",
+  "description": "Registry of all supported assertion matchers. The executor MUST reject any matcher name not listed here.",
+  "matchers": {
+    "toHaveURL": {
+      "scope": "page",
+      "description": "Current page URL contains the given string (case-sensitive substring match).",
+      "requiredFields": ["value"],
+      "optionalFields": [],
+      "comparisonMode": "contains",
+      "playwrightExecution": "page.waitForURL(url => url.href.includes(value), { timeout })",
+      "failureMessageTemplate": "Expected page URL to contain \"{value}\" but got \"{actual}\""
+    },
+    "toContainURL": {
+      "scope": "page",
+      "description": "Alias for toHaveURL — URL contains the given string.",
+      "requiredFields": ["value"],
+      "optionalFields": [],
+      "comparisonMode": "contains",
+      "playwrightExecution": "page.waitForURL(url => url.href.includes(value), { timeout })",
+      "failureMessageTemplate": "Expected page URL to contain \"{value}\" but got \"{actual}\""
+    },
+    "toBeVisible": {
+      "scope": "element",
+      "description": "Target element is visible in the viewport.",
+      "requiredFields": [],
+      "optionalFields": [],
+      "comparisonMode": "state",
+      "playwrightExecution": "locator.waitFor({ state: 'visible', timeout })",
+      "failureMessageTemplate": "Expected element to be visible"
+    },
+    "toBeHidden": {
+      "scope": "element",
+      "description": "Target element is hidden or not in the DOM.",
+      "requiredFields": [],
+      "optionalFields": [],
+      "comparisonMode": "state",
+      "playwrightExecution": "locator.waitFor({ state: 'hidden', timeout })",
+      "failureMessageTemplate": "Expected element to be hidden"
+    },
+    "toHaveText": {
+      "scope": "element",
+      "description": "Element textContent equals the given string.",
+      "requiredFields": ["value"],
+      "optionalFields": ["exact"],
+      "comparisonMode": "exact",
+      "playwrightExecution": "locator.textContent() === value",
+      "failureMessageTemplate": "Expected element text to equal \"{value}\" but got \"{actual}\""
+    },
+    "toContainText": {
+      "scope": "element",
+      "description": "Element textContent contains the given string.",
+      "requiredFields": ["value"],
+      "optionalFields": [],
+      "comparisonMode": "contains",
+      "playwrightExecution": "locator.textContent().includes(value)",
+      "failureMessageTemplate": "Expected element text to contain \"{value}\" but got \"{actual}\""
+    },
+    "toHaveValue": {
+      "scope": "element",
+      "description": "Input element's current value equals the given string.",
+      "requiredFields": ["value"],
+      "optionalFields": [],
+      "comparisonMode": "exact",
+      "playwrightExecution": "locator.inputValue() === value",
+      "failureMessageTemplate": "Expected element value to equal \"{value}\" but got \"{actual}\""
+    },
+    "toHaveAttribute": {
+      "scope": "element",
+      "description": "Element attribute equals the given value.",
+      "requiredFields": ["attribute", "value"],
+      "optionalFields": [],
+      "comparisonMode": "exact",
+      "playwrightExecution": "locator.getAttribute(attribute) === value",
+      "failureMessageTemplate": "Expected element attribute \"{attribute}\" to equal \"{value}\" but got \"{actual}\""
+    },
+    "toHaveCountGreaterThan": {
+      "scope": "element",
+      "description": "Number of elements matching the locator is strictly greater than the given number.",
+      "requiredFields": ["value"],
+      "optionalFields": [],
+      "comparisonMode": "greaterThan",
+      "playwrightExecution": "locator.count() > value",
+      "failureMessageTemplate": "Expected element count > {value} but got {actual}"
+    },
+    "toChangeFromStored": {
+      "scope": "element",
+      "description": "Current element textContent differs from a previously captured value stored under storedKey in runtime.captured.",
+      "requiredFields": ["storedKey"],
+      "optionalFields": [],
+      "comparisonMode": "notEqual",
+      "playwrightExecution": "locator.textContent() !== context.getCaptured(storedKey)",
+      "failureMessageTemplate": "Expected element to have changed from stored value \"{stored}\" but got \"{actual}\""
+    },
+    "textOrAriaStateChanged": {
+      "scope": "element",
+      "description": "Element text or aria attributes differ from the snapshot auto-captured before the previous click step on the same nodeId. Falls back to storedKey if provided.",
+      "requiredFields": [],
+      "optionalFields": ["storedKey"],
+      "comparisonMode": "notEqual",
+      "playwrightExecution": "compare current aria/text state with runtime._autoCapture_{nodeId}",
+      "failureMessageTemplate": "Expected element text or aria state to have changed after last action"
+    },
+    "toHaveScrollYLessThanOrEqual": {
+      "scope": "page",
+      "description": "Current window.scrollY is less than or equal to the given number.",
+      "requiredFields": ["value"],
+      "optionalFields": [],
+      "comparisonMode": "lte",
+      "playwrightExecution": "page.evaluate(() => window.scrollY) <= value",
+      "failureMessageTemplate": "Expected scrollY <= {value} but got {actual}"
+    },
+    "toSatisfyAny": {
+      "scope": "page",
+      "description": "At least one sub-condition in the value array is satisfied. Supported sub-condition types: urlContains, textVisible.",
+      "requiredFields": ["value"],
+      "optionalFields": [],
+      "comparisonMode": "any",
+      "playwrightExecution": "evaluate each sub-condition; pass if any returns true",
+      "failureMessageTemplate": "Expected at least one condition to be satisfied: {conditions}",
+      "subConditionTypes": {
+        "urlContains": { "requiredFields": ["value"] },
+        "textVisible": { "requiredFields": ["value"] }
+      }
+    }
+  }
+}

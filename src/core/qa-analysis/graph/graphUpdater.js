@@ -1,0 +1,143 @@
+/**
+ * core/graph/graphUpdater.js
+ *
+ * Mutates the in-memory graph produced by graphStore.createGraph().
+ * All functions accept the graph as first parameter and mutate it in-place.
+ * The graph is per-request; call graphStore.saveSnapshot() to write a
+ * point-in-time artifact for debugging — no global file is ever written.
+ *
+ * DUPLICATE PREVENTION (within a single request/crawl run)
+ * ─────────────────────────────────────────────────────────
+ * findNode() + node.analyzed lets the caller skip Phase 1 for pages that
+ * have already been analyzed within the same run.  Because the graph is
+ * per-request, this only prevents revisits inside one crawl, not across runs.
+ */
+
+import { createNode, createEdge } from './graphModel.js';
+
+// ── Node operations ───────────────────────────────────────────────────────────
+
+/**
+ * Look up a node by dedupKey.
+ * Returns null if not found.
+ *
+ * @param {{ nodes: object, edges: object }} graph
+ * @param {string} dedupKey
+ * @returns {object|null}
+ */
+export function findNode(graph, dedupKey) {
+  return graph.nodes[dedupKey] ?? null;
+}
+
+/**
+ * Create a new node or update an existing one.
+ *
+ * If the node does not exist: create it.
+ * If the node already exists:
+ *   - update lastSeenAt
+ *   - append jobId if not already present
+ *   - append representativeUrl to discoveredVariants if not already present
+ *
+ * @param {{ nodes: object, edges: object }} graph
+ * @param {{ hostname, normalizedPath, dedupKey, representativeUrl, jobId }} opts
+ * @returns {{ node: object, created: boolean }}
+ */
+export function upsertNode(graph, { hostname, normalizedPath, displayPath, dedupKey, representativeUrl, jobId, authGated = false }) {
+  const existing = graph.nodes[dedupKey];
+  if (existing) {
+    existing.lastSeenAt = new Date().toISOString();
+    if (!existing.discoveredByJobIds.includes(jobId)) {
+      existing.discoveredByJobIds.push(jobId);
+    }
+    if (!existing.discoveredVariants.includes(representativeUrl)) {
+      existing.discoveredVariants.push(representativeUrl);
+    }
+    // Promote authGated flag if new discovery reveals auth nature
+    if (authGated && !existing.authGated) {
+      existing.authGated = true;
+    }
+    // Backfill displayPath on older nodes that were created without it
+    if (!existing.displayPath && (normalizedPath || displayPath)) {
+      existing.displayPath = displayPath ?? (() => { try { return decodeURIComponent(normalizedPath); } catch { return normalizedPath; } })();
+    }
+    return { node: existing, created: false };
+  }
+
+  const node = createNode({ hostname, normalizedPath, displayPath, dedupKey, representativeUrl, jobId, authGated });
+  graph.nodes[dedupKey] = node;
+  return { node, created: true };
+}
+
+/**
+ * Mark a node as having been analyzed (Phase 1 complete).
+ * Sets analyzed, analyzedAt, analysisStatus, and quality metrics.
+ *
+ * analysisStatus values (ordered best → worst):
+ *   analyzed_successfully          — DOM extracted, nodes and links present
+ *   analyzed_partially             — some extraction succeeded, some failed
+ *   screenshot_only_no_dom         — screenshot exists but DOM was empty
+ *   context_destroyed_mid_analysis — V8 context destroyed during extraction
+ *   post_auth_unstable             — post-auth page never stabilized
+ *   failed_analysis                — extraction failed catastrophically
+ *
+ * @param {{ nodes: object }} graph
+ * @param {string} dedupKey
+ * @param {string} [status='analyzed_successfully']
+ * @param {{ domNodeCount?: number, linkCount?: number, degradedBecauseContextDestroyed?: boolean }} [quality]
+ */
+export function markNodeAnalyzed(graph, dedupKey, status = 'analyzed_successfully', quality = {}) {
+  const node = graph.nodes[dedupKey];
+  if (!node) return;
+  node.analyzed        = true;
+  node.analyzedAt      = new Date().toISOString();
+  node.analysisStatus  = status;
+  node.analysisQuality = { status, domNodeCount: quality.domNodeCount ?? null, linkCount: quality.linkCount ?? null, emptyResultCause: quality.emptyResultCause ?? null };
+  if (quality.domNodeCount  != null) node.domNodeCount  = quality.domNodeCount;
+  if (quality.linkCount     != null) node.linkCount     = quality.linkCount;
+  if (quality.emptyResultCause != null) node.emptyResultCause = quality.emptyResultCause;
+  if (quality.degradedBecauseContextDestroyed) node.degradedBecauseContextDestroyed = true;
+}
+
+/**
+ * Record the most recent reachability status from a pre-flight check.
+ *
+ * @param {{ nodes: object }} graph
+ * @param {string} dedupKey
+ * @param {string} reachabilityStatus  - e.g. 'reachable_now', 'auth_required'
+ */
+export function updateNodeReachability(graph, dedupKey, reachabilityStatus) {
+  const node = graph.nodes[dedupKey];
+  if (!node) return;
+  node.lastReachabilityStatus = reachabilityStatus;
+}
+
+// ── Edge operations ───────────────────────────────────────────────────────────
+
+/**
+ * Create a directed edge or reuse an existing one for the same (from, to) pair.
+ * Only one edge is kept per directed pair regardless of how many times the
+ * link is discovered.
+ *
+ * @param {{ nodes: object, edges: object }} graph
+ * @param {{ fromNodeId, toNodeId, jobId, discoverySource, triggerId?, representativeUrl }} opts
+ * @returns {{ edge: object, created: boolean }}
+ */
+export function upsertEdge(graph, {
+  fromNodeId, toNodeId, jobId, discoverySource, triggerId,
+  representativeUrl, edgeType, requiresAuth, authDetected, authScore, navigationStatus,
+}) {
+  // Linear scan — acceptable for a local toy-project graph
+  const existing = Object.values(graph.edges).find(
+    (e) => e.fromNodeId === fromNodeId && e.toNodeId === toNodeId,
+  );
+  if (existing) {
+    return { edge: existing, created: false };
+  }
+
+  const edge = createEdge({
+    fromNodeId, toNodeId, jobId, discoverySource, triggerId,
+    representativeUrl, edgeType, requiresAuth, authDetected, authScore, navigationStatus,
+  });
+  graph.edges[edge.edgeId] = edge;
+  return { edge, created: true };
+}

@@ -1,0 +1,777 @@
+{
+  "_comment": "11번가 홈페이지 QA 실행 계약 종합 예시 — 모든 스텝 타입·매처·시그널·캡처 종류·변수 네임스페이스를 실제 분석 데이터 기반으로 커버합니다.",
+
+  "suiteId": "11ST-FULL-CONTRACT-EXAMPLE-001",
+  "title": "QA 실행 계약 종합 예시 (11번가 홈 기반)",
+  "description": "12개 스텝 타입 · 13개 매처 · 7개 시그널 · 10개 캡처 종류 · 4개 변수 네임스페이스를 모두 포함하는 완전 실행 가능 예시 스위트",
+
+  "analysisContext": {
+    "analysisJobId": "2026-04-21T04-53-05-25b585cd",
+    "finalUrl": "https://www.11st.co.kr/",
+    "pageTitle": "11번가"
+  },
+
+  "environment": {
+    "baseURL": "https://www.11st.co.kr",
+    "locale": "ko-KR",
+    "timezoneId": "Asia/Seoul",
+    "viewport": { "width": 1920, "height": 1080 }
+  },
+
+  "defaults": {
+    "executionPolicy": {
+      "stopOnFailure": false,
+      "maxStepRetries": 1,
+      "timeoutMs": 15000,
+      "expectTimeoutMs": 5000,
+      "captureOnFailure": true,
+      "captureOnSuccess": false
+    },
+    "reporting": {
+      "attachStepInputs": true,
+      "attachResolvedTargets": true,
+      "saveTrace": true,
+      "saveVideoOnFailure": true,
+      "saveScreenshotOnFailure": true
+    },
+    "safety": {
+      "allowExternalNavigation": false,
+      "allowFileUpload": false,
+      "allowDestructiveAction": false,
+      "allowSensitiveAuthAction": false
+    }
+  },
+
+  "scenarios": [
+
+    {
+      "_comment": "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ SCENARIO 1 ━━",
+      "_covers": "스텝: goto·fill·press·capture(value·url)·expect | 매처: toHaveURL·toSatisfyAny | 시그널: elementVisible·urlChanged·networkRequest | 변수: data.*·captured.*",
+
+      "scenarioId": "EXAMPLE-SEARCH-001",
+      "title": "검색 기능 종합 — fill · press · toHaveURL · toSatisfyAny",
+      "priority": "P0",
+      "tags": ["@smoke", "@search"],
+      "data": {
+        "keyword": "노트북"
+      },
+
+      "preconditions": [
+        {
+          "stepId": "pre-1",
+          "type": "goto",
+          "name": "홈 페이지 진입",
+          "url": "/",
+          "timeoutMs": 15000
+        }
+      ],
+
+      "steps": [
+
+        {
+          "stepId": "s1-fill-search",
+          "type": "fill",
+          "name": "검색창에 키워드 입력 (data.keyword, analysisRef, elementVisible 시그널)",
+          "targetRef": { "nodeId": "node-14" },
+          "resolution": {
+            "preferred": "analysisRef",
+            "strict": false,
+            "locatorFallback": { "strategy": "css", "value": "input.search_text.search_text_ad" }
+          },
+          "input": { "valueTemplate": "${data.keyword}" },
+          "expectedSignals": [
+            { "type": "elementVisible", "required": false }
+          ],
+          "timeoutMs": 5000
+        },
+
+        {
+          "stepId": "s1-capture-value",
+          "type": "capture",
+          "name": "입력된 값 캡처 — capture kind: value",
+          "targetRef": { "nodeId": "node-14" },
+          "resolution": {
+            "preferred": "analysisRef",
+            "locatorFallback": { "strategy": "css", "value": "input.search_text.search_text_ad" }
+          },
+          "capture": { "kind": "value", "saveAs": "inputValue" },
+          "timeoutMs": 5000
+        },
+
+        {
+          "stepId": "s1-fill-from-captured",
+          "type": "fill",
+          "name": "캡처된 값으로 재입력 — captured.* 네임스페이스 사용",
+          "targetRef": { "nodeId": "node-14" },
+          "resolution": {
+            "preferred": "analysisRef",
+            "locatorFallback": { "strategy": "css", "value": "input.search_text.search_text_ad" }
+          },
+          "input": { "valueTemplate": "${captured.inputValue}" },
+          "timeoutMs": 5000
+        },
+
+        {
+          "stepId": "s1-press-enter",
+          "type": "press",
+          "name": "Enter 키 입력 (targetRef로 포커스, urlChanged · networkRequest 시그널)",
+          "targetRef": { "nodeId": "node-14" },
+          "resolution": {
+            "preferred": "analysisRef",
+            "locatorFallback": { "strategy": "css", "value": "input.search_text.search_text_ad" }
+          },
+          "key": "Enter",
+          "expectedSignals": [
+            { "type": "urlChanged",      "required": true },
+            { "type": "networkRequest",  "required": false, "urlContains": "search" }
+          ],
+          "timeoutMs": 10000
+        },
+
+        {
+          "stepId": "s1-expect-url",
+          "type": "expect",
+          "name": "검색 결과 URL 확인 — matcher: toHaveURL",
+          "assertion": {
+            "matcher": "toHaveURL",
+            "value": "search"
+          },
+          "timeoutMs": 7000
+        },
+
+        {
+          "stepId": "s1-expect-any",
+          "type": "expect",
+          "name": "URL 포함 또는 키워드 노출 중 하나 만족 — matcher: toSatisfyAny",
+          "assertion": {
+            "matcher": "toSatisfyAny",
+            "value": [
+              { "type": "urlContains",  "value": "search" },
+              { "type": "textVisible",  "value": "노트북" }
+            ]
+          }
+        },
+
+        {
+          "stepId": "s1-capture-url",
+          "type": "capture",
+          "name": "현재 페이지 URL 캡처 — capture kind: url (페이지 수준, html fallback)",
+          "targetRef": {},
+          "resolution": {
+            "preferred": "locatorFallback",
+            "locatorFallback": { "strategy": "css", "value": "html" }
+          },
+          "capture": { "kind": "url", "saveAs": "searchResultUrl" }
+        }
+
+      ]
+    },
+
+    {
+      "_comment": "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ SCENARIO 2 ━━",
+      "_covers": "스텝: waitFor·click·capture(text·innerText·textContent·visible)·expect | 매처: toBeVisible·toHaveText·toContainText·toHaveCountGreaterThan·toContainURL | 시그널: domChanged·urlChanged·urlChangedOptional",
+
+      "scenarioId": "EXAMPLE-NAV-002",
+      "title": "헤더 탐색 및 요소 종합 검증 — waitFor · click · 다중 매처",
+
+      "preconditions": [
+        {
+          "stepId": "pre-1",
+          "type": "goto",
+          "name": "홈 페이지 진입",
+          "url": "/"
+        }
+      ],
+
+      "steps": [
+
+        {
+          "stepId": "s2-waitfor-heading",
+          "type": "waitFor",
+          "name": "메인 섹션 h2 heading 렌더링 대기 — waitFor kind: visible, domChanged 시그널",
+          "targetRef": { "nodeId": "node-172" },
+          "resolution": {
+            "preferred": "analysisRef",
+            "locatorFallback": { "strategy": "text", "value": "오늘의 브랜드" }
+          },
+          "waitFor": { "kind": "visible" },
+          "expectedSignals": [
+            { "type": "domChanged", "required": false }
+          ],
+          "timeoutMs": 8000
+        },
+
+        {
+          "stepId": "s2-expect-visible",
+          "type": "expect",
+          "name": "heading 가시성 확인 — matcher: toBeVisible",
+          "assertion": {
+            "matcher": "toBeVisible",
+            "targetRef": { "nodeId": "node-172" },
+            "resolution": {
+              "preferred": "analysisRef",
+              "locatorFallback": { "strategy": "text", "value": "오늘의 브랜드" }
+            }
+          },
+          "timeoutMs": 5000
+        },
+
+        {
+          "stepId": "s2-expect-have-text",
+          "type": "expect",
+          "name": "heading 텍스트 정확히 일치 — matcher: toHaveText",
+          "assertion": {
+            "matcher": "toHaveText",
+            "value": "오늘의 브랜드",
+            "targetRef": { "nodeId": "node-172" },
+            "resolution": {
+              "preferred": "analysisRef",
+              "locatorFallback": { "strategy": "text", "value": "오늘의 브랜드" }
+            }
+          }
+        },
+
+        {
+          "stepId": "s2-expect-contain-text",
+          "type": "expect",
+          "name": "heading 텍스트 부분 포함 — matcher: toContainText",
+          "assertion": {
+            "matcher": "toContainText",
+            "value": "오늘의",
+            "targetRef": { "nodeId": "node-172" },
+            "resolution": {
+              "preferred": "analysisRef",
+              "locatorFallback": { "strategy": "text", "value": "오늘의 브랜드" }
+            }
+          }
+        },
+
+        {
+          "stepId": "s2-expect-count",
+          "type": "expect",
+          "name": "페이지 내 h2 요소 2개 이상 존재 — matcher: toHaveCountGreaterThan",
+          "assertion": {
+            "matcher": "toHaveCountGreaterThan",
+            "value": 1,
+            "targetRef": {},
+            "resolution": {
+              "preferred": "locatorFallback",
+              "locatorFallback": { "strategy": "css", "value": "h2" }
+            }
+          }
+        },
+
+        {
+          "stepId": "s2-capture-text",
+          "type": "capture",
+          "name": "heading 텍스트 캡처 — capture kind: text",
+          "targetRef": { "nodeId": "node-172" },
+          "resolution": {
+            "preferred": "analysisRef",
+            "locatorFallback": { "strategy": "text", "value": "오늘의 브랜드" }
+          },
+          "capture": { "kind": "text", "saveAs": "h2Text" }
+        },
+
+        {
+          "stepId": "s2-capture-innertext",
+          "type": "capture",
+          "name": "heading innerText 캡처 — capture kind: innerText",
+          "targetRef": { "nodeId": "node-172" },
+          "resolution": {
+            "preferred": "analysisRef",
+            "locatorFallback": { "strategy": "text", "value": "오늘의 브랜드" }
+          },
+          "capture": { "kind": "innerText", "saveAs": "h2InnerText" }
+        },
+
+        {
+          "stepId": "s2-capture-textcontent",
+          "type": "capture",
+          "name": "heading textContent 캡처 — capture kind: textContent",
+          "targetRef": { "nodeId": "node-172" },
+          "resolution": {
+            "preferred": "analysisRef",
+            "locatorFallback": { "strategy": "text", "value": "오늘의 브랜드" }
+          },
+          "capture": { "kind": "textContent", "saveAs": "h2TextContent" }
+        },
+
+        {
+          "stepId": "s2-capture-visible",
+          "type": "capture",
+          "name": "heading 가시성 boolean 캡처 — capture kind: visible",
+          "targetRef": { "nodeId": "node-172" },
+          "resolution": {
+            "preferred": "analysisRef",
+            "locatorFallback": { "strategy": "text", "value": "오늘의 브랜드" }
+          },
+          "capture": { "kind": "visible", "saveAs": "h2Visible" }
+        },
+
+        {
+          "stepId": "s2-click-best",
+          "type": "click",
+          "name": "베스트 메뉴 클릭 — analysisRef, urlChanged · urlChangedOptional 시그널",
+          "targetRef": { "nodeId": "node-43" },
+          "resolution": {
+            "preferred": "analysisRef",
+            "locatorFallback": { "strategy": "text", "value": "베스트" }
+          },
+          "expectedSignals": [
+            { "type": "urlChanged",         "required": true },
+            { "type": "urlChangedOptional", "required": false }
+          ],
+          "timeoutMs": 8000
+        },
+
+        {
+          "stepId": "s2-expect-best-url",
+          "type": "expect",
+          "name": "베스트 페이지 URL 포함 확인 — matcher: toContainURL",
+          "assertion": {
+            "matcher": "toContainURL",
+            "value": "/page/best"
+          },
+          "timeoutMs": 7000
+        }
+
+      ]
+    },
+
+    {
+      "_comment": "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ SCENARIO 3 ━━",
+      "_covers": "스텝: capture(aria·screenshot)·click·expect | 매처: textOrAriaStateChanged·toChangeFromStored | 시그널: domChanged·domChangedOptional",
+
+      "scenarioId": "EXAMPLE-PROMO-003",
+      "title": "프로모션 슬라이더 상태 변화 — aria 캡처 · textOrAriaStateChanged · toChangeFromStored",
+
+      "preconditions": [
+        {
+          "stepId": "pre-1",
+          "type": "goto",
+          "name": "홈 페이지 진입",
+          "url": "/"
+        }
+      ],
+
+      "steps": [
+
+        {
+          "stepId": "s3-capture-aria-before",
+          "type": "capture",
+          "name": "다음 프로모션 버튼의 aria 상태 사전 캡처 — capture kind: aria",
+          "targetRef": { "nodeId": "node-156" },
+          "resolution": {
+            "preferred": "analysisRef",
+            "locatorFallback": { "strategy": "text", "value": "다음 프로모션" }
+          },
+          "capture": { "kind": "aria", "saveAs": "promoAriaState" }
+        },
+
+        {
+          "stepId": "s3-capture-text-before",
+          "type": "capture",
+          "name": "자동슬라이드 멈춤 버튼 텍스트 사전 캡처 — toChangeFromStored에서 사용",
+          "targetRef": { "nodeId": "node-159" },
+          "resolution": {
+            "preferred": "analysisRef",
+            "locatorFallback": { "strategy": "text", "value": "자동슬라이드 멈춤" }
+          },
+          "capture": { "kind": "text", "saveAs": "stopBtnText" }
+        },
+
+        {
+          "stepId": "s3-click-next-promo",
+          "type": "click",
+          "name": "다음 프로모션 클릭 — 자동 aria/text 사전 캡처 + domChanged · domChangedOptional 시그널",
+          "targetRef": { "nodeId": "node-156" },
+          "resolution": {
+            "preferred": "analysisRef",
+            "locatorFallback": { "strategy": "text", "value": "다음 프로모션" }
+          },
+          "expectedSignals": [
+            { "type": "domChanged",         "required": true },
+            { "type": "domChangedOptional", "required": false }
+          ],
+          "timeoutMs": 8000
+        },
+
+        {
+          "stepId": "s3-expect-aria-changed",
+          "type": "expect",
+          "name": "클릭 후 버튼 aria/text 상태가 변경됐는지 확인 — matcher: textOrAriaStateChanged",
+          "assertion": {
+            "matcher": "textOrAriaStateChanged",
+            "targetRef": { "nodeId": "node-156" },
+            "resolution": {
+              "preferred": "analysisRef",
+              "locatorFallback": { "strategy": "text", "value": "다음 프로모션" }
+            }
+          },
+          "timeoutMs": 5000
+        },
+
+        {
+          "stepId": "s3-click-stop-slide",
+          "type": "click",
+          "name": "자동슬라이드 멈춤 버튼 클릭",
+          "targetRef": { "nodeId": "node-159" },
+          "resolution": {
+            "preferred": "analysisRef",
+            "locatorFallback": { "strategy": "text", "value": "자동슬라이드 멈춤" }
+          },
+          "expectedSignals": [
+            { "type": "domChangedOptional", "required": false }
+          ],
+          "timeoutMs": 5000
+        },
+
+        {
+          "stepId": "s3-expect-text-changed",
+          "type": "expect",
+          "name": "멈춤 버튼 텍스트가 사전 캡처 값과 다른지 확인 — matcher: toChangeFromStored",
+          "assertion": {
+            "matcher": "toChangeFromStored",
+            "storedKey": "stopBtnText",
+            "targetRef": { "nodeId": "node-159" },
+            "resolution": {
+              "preferred": "analysisRef",
+              "locatorFallback": { "strategy": "text", "value": "자동슬라이드 멈춤" }
+            }
+          },
+          "timeoutMs": 5000
+        },
+
+        {
+          "stepId": "s3-capture-screenshot",
+          "type": "capture",
+          "name": "슬라이더 버튼 스크린샷 캡처 — capture kind: screenshot",
+          "targetRef": { "nodeId": "node-156" },
+          "resolution": {
+            "preferred": "analysisRef",
+            "locatorFallback": { "strategy": "text", "value": "다음 프로모션" }
+          },
+          "capture": { "kind": "screenshot", "saveAs": "promoScreenshot" }
+        }
+
+      ]
+    },
+
+    {
+      "_comment": "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ SCENARIO 4 ━━",
+      "_covers": "스텝: scroll·scrollToElement·capture(scrollY·screenshot) | 매처: toHaveScrollYLessThanOrEqual | 시그널: scrollChanged",
+
+      "scenarioId": "EXAMPLE-SCROLL-004",
+      "title": "스크롤 종합 — scroll · scrollToElement · scrollY 캡처 · toHaveScrollYLessThanOrEqual",
+
+      "preconditions": [
+        {
+          "stepId": "pre-1",
+          "type": "goto",
+          "name": "홈 페이지 진입",
+          "url": "/"
+        }
+      ],
+
+      "steps": [
+
+        {
+          "stepId": "s4-scroll-down",
+          "type": "scroll",
+          "name": "페이지 아래로 스크롤 — scrollChanged 시그널",
+          "scroll": { "direction": "down", "pixels": 2000 },
+          "expectedSignals": [
+            { "type": "scrollChanged", "required": false }
+          ]
+        },
+
+        {
+          "stepId": "s4-expect-scrolly",
+          "type": "expect",
+          "name": "스크롤 위치 임계값 이하 확인 — matcher: toHaveScrollYLessThanOrEqual",
+          "assertion": {
+            "matcher": "toHaveScrollYLessThanOrEqual",
+            "value": 10000
+          }
+        },
+
+        {
+          "stepId": "s4-capture-scrolly",
+          "type": "capture",
+          "name": "현재 scrollY 위치 캡처 — capture kind: scrollY (페이지 수준)",
+          "targetRef": {},
+          "resolution": {
+            "preferred": "locatorFallback",
+            "locatorFallback": { "strategy": "css", "value": "html" }
+          },
+          "capture": { "kind": "scrollY", "saveAs": "scrollPosition" }
+        },
+
+        {
+          "stepId": "s4-scroll-to-heading",
+          "type": "scrollToElement",
+          "name": "오늘의 브랜드 섹션으로 스크롤 이동 — scrollChanged 시그널",
+          "targetRef": { "nodeId": "node-172" },
+          "resolution": {
+            "preferred": "analysisRef",
+            "locatorFallback": { "strategy": "text", "value": "오늘의 브랜드" }
+          },
+          "expectedSignals": [
+            { "type": "scrollChanged", "required": false }
+          ],
+          "timeoutMs": 5000
+        },
+
+        {
+          "stepId": "s4-capture-screenshot-element",
+          "type": "capture",
+          "name": "스크롤 후 섹션 heading 스크린샷 — capture kind: screenshot (요소 기준)",
+          "targetRef": { "nodeId": "node-172" },
+          "resolution": {
+            "preferred": "analysisRef",
+            "locatorFallback": { "strategy": "text", "value": "오늘의 브랜드" }
+          },
+          "capture": { "kind": "screenshot", "saveAs": "headingScreenshot" }
+        },
+
+        {
+          "stepId": "s4-scroll-up",
+          "type": "scroll",
+          "name": "페이지 위로 스크롤",
+          "scroll": { "direction": "up", "pixels": 2000 },
+          "expectedSignals": [
+            { "type": "scrollChanged", "required": false }
+          ]
+        },
+
+        {
+          "stepId": "s4-expect-scrolly-top",
+          "type": "expect",
+          "name": "최상단 근처 위치 확인 — toHaveScrollYLessThanOrEqual",
+          "assertion": {
+            "matcher": "toHaveScrollYLessThanOrEqual",
+            "value": 300
+          }
+        }
+
+      ]
+    },
+
+    {
+      "_comment": "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ SCENARIO 5 ━━",
+      "_covers": "스텝: capture(attribute·value)·fill·press(keyboard-only)·expect | 매처: toHaveAttribute·toHaveValue·toBeHidden | locatorFallback-only 해석",
+
+      "scenarioId": "EXAMPLE-ELEM-005",
+      "title": "요소 속성/값 검증 — toHaveAttribute · toHaveValue · toBeHidden · press(keyboard-only)",
+      "data": {
+        "keyword": "운동화"
+      },
+
+      "preconditions": [
+        {
+          "stepId": "pre-1",
+          "type": "goto",
+          "name": "홈 페이지 진입",
+          "url": "/"
+        }
+      ],
+
+      "steps": [
+
+        {
+          "stepId": "s5-capture-attribute",
+          "type": "capture",
+          "name": "검색 input의 type 속성 캡처 — capture kind: attribute",
+          "targetRef": { "nodeId": "node-14" },
+          "resolution": {
+            "preferred": "analysisRef",
+            "locatorFallback": { "strategy": "css", "value": "input.search_text.search_text_ad" }
+          },
+          "capture": {
+            "kind": "attribute",
+            "attributeName": "type",
+            "saveAs": "inputTypeAttr"
+          }
+        },
+
+        {
+          "stepId": "s5-expect-attribute",
+          "type": "expect",
+          "name": "검색 input의 type 속성이 text인지 확인 — matcher: toHaveAttribute",
+          "assertion": {
+            "matcher": "toHaveAttribute",
+            "attribute": "type",
+            "value": "text",
+            "targetRef": { "nodeId": "node-14" },
+            "resolution": {
+              "preferred": "analysisRef",
+              "locatorFallback": { "strategy": "css", "value": "input.search_text.search_text_ad" }
+            }
+          }
+        },
+
+        {
+          "stepId": "s5-fill-keyword",
+          "type": "fill",
+          "name": "검색창 키워드 입력",
+          "targetRef": { "nodeId": "node-14" },
+          "resolution": {
+            "preferred": "analysisRef",
+            "locatorFallback": { "strategy": "css", "value": "input.search_text.search_text_ad" }
+          },
+          "input": { "valueTemplate": "${data.keyword}" },
+          "timeoutMs": 5000
+        },
+
+        {
+          "stepId": "s5-expect-value",
+          "type": "expect",
+          "name": "입력된 input value 확인 — matcher: toHaveValue",
+          "assertion": {
+            "matcher": "toHaveValue",
+            "value": "운동화",
+            "targetRef": { "nodeId": "node-14" },
+            "resolution": {
+              "preferred": "analysisRef",
+              "locatorFallback": { "strategy": "css", "value": "input.search_text.search_text_ad" }
+            }
+          }
+        },
+
+        {
+          "stepId": "s5-press-escape",
+          "type": "press",
+          "name": "Escape 키 입력 — targetRef 없이 키보드 전역 press (page.keyboard.press)",
+          "key": "Escape"
+        },
+
+        {
+          "stepId": "s5-expect-hidden",
+          "type": "expect",
+          "name": "검색 자동완성 레이어가 닫혔는지 확인 — matcher: toBeHidden (locatorFallback-only)",
+          "assertion": {
+            "matcher": "toBeHidden",
+            "targetRef": {},
+            "resolution": {
+              "preferred": "locatorFallback",
+              "locatorFallback": { "strategy": "css", "value": ".suggest_layer" }
+            }
+          },
+          "timeoutMs": 3000
+        }
+
+      ]
+    },
+
+    {
+      "_comment": "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ SCENARIO 6 ━━",
+      "_covers": "스텝: select·check·uncheck·fill(credential.*) | 매처: toHaveValue | 시그널: domChanged | 변수: credential.*·data.*",
+
+      "scenarioId": "EXAMPLE-FORM-006",
+      "title": "폼 인터랙션 — select · check · uncheck · credential 변수 (가상 로그인 폼 예시)",
+      "data": {
+        "sortOption": "price_asc",
+        "rememberMe": "on"
+      },
+
+      "preconditions": [
+        {
+          "stepId": "pre-1",
+          "type": "goto",
+          "name": "로그인 페이지 진입 (가상 경로)",
+          "url": "/login"
+        }
+      ],
+
+      "steps": [
+
+        {
+          "stepId": "s6-fill-id",
+          "type": "fill",
+          "name": "아이디 입력 — credential.username 네임스페이스",
+          "targetRef": {},
+          "resolution": {
+            "preferred": "locatorFallback",
+            "locatorFallback": { "strategy": "css", "value": "input[name='mem_id']" }
+          },
+          "input": { "valueTemplate": "${credential.username}" },
+          "timeoutMs": 5000
+        },
+
+        {
+          "stepId": "s6-fill-pw",
+          "type": "fill",
+          "name": "비밀번호 입력 — credential.password 네임스페이스",
+          "targetRef": {},
+          "resolution": {
+            "preferred": "locatorFallback",
+            "locatorFallback": { "strategy": "css", "value": "input[name='mem_pwd']" }
+          },
+          "input": { "valueTemplate": "${credential.password}" },
+          "timeoutMs": 5000
+        },
+
+        {
+          "stepId": "s6-select-sort",
+          "type": "select",
+          "name": "정렬 옵션 선택 — data.sortOption, domChanged 시그널",
+          "targetRef": {},
+          "resolution": {
+            "preferred": "locatorFallback",
+            "locatorFallback": { "strategy": "css", "value": "select.sort-option" }
+          },
+          "input": { "value": "${data.sortOption}" },
+          "expectedSignals": [
+            { "type": "domChanged", "required": false }
+          ],
+          "timeoutMs": 5000
+        },
+
+        {
+          "stepId": "s6-expect-select-value",
+          "type": "expect",
+          "name": "선택된 옵션 값 확인 — matcher: toHaveValue",
+          "assertion": {
+            "matcher": "toHaveValue",
+            "value": "price_asc",
+            "targetRef": {},
+            "resolution": {
+              "preferred": "locatorFallback",
+              "locatorFallback": { "strategy": "css", "value": "select.sort-option" }
+            }
+          }
+        },
+
+        {
+          "stepId": "s6-check-remember",
+          "type": "check",
+          "name": "로그인 유지 체크박스 체크 — domChanged 시그널",
+          "targetRef": {},
+          "resolution": {
+            "preferred": "locatorFallback",
+            "locatorFallback": { "strategy": "css", "value": "input[type='checkbox'][name='rememberMe']" }
+          },
+          "expectedSignals": [
+            { "type": "domChanged", "required": false }
+          ],
+          "timeoutMs": 3000
+        },
+
+        {
+          "stepId": "s6-uncheck-remember",
+          "type": "uncheck",
+          "name": "로그인 유지 체크박스 해제",
+          "targetRef": {},
+          "resolution": {
+            "preferred": "locatorFallback",
+            "locatorFallback": { "strategy": "css", "value": "input[type='checkbox'][name='rememberMe']" }
+          },
+          "timeoutMs": 3000
+        }
+
+      ]
+    }
+
+  ]
+}

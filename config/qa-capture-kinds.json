@@ -1,0 +1,76 @@
+{
+  "schemaVersion": "2.0",
+  "description": "Registry of supported capture kinds for capture steps.",
+  "captureKinds": {
+    "text": {
+      "description": "Visible textContent of the element (trimmed).",
+      "scope": "element",
+      "playwrightExecution": "locator.textContent()",
+      "requiredFields": [],
+      "optionalFields": []
+    },
+    "innerText": {
+      "description": "Rendered inner text of the element (respects CSS display).",
+      "scope": "element",
+      "playwrightExecution": "locator.innerText()",
+      "requiredFields": [],
+      "optionalFields": []
+    },
+    "textContent": {
+      "description": "Full textContent including hidden text. Alias of text.",
+      "scope": "element",
+      "playwrightExecution": "locator.textContent()",
+      "requiredFields": [],
+      "optionalFields": []
+    },
+    "value": {
+      "description": "Current value of an input, textarea, or select element.",
+      "scope": "element",
+      "playwrightExecution": "locator.inputValue()",
+      "requiredFields": [],
+      "optionalFields": []
+    },
+    "attribute": {
+      "description": "Value of a named element attribute.",
+      "scope": "element",
+      "playwrightExecution": "locator.getAttribute(attributeName)",
+      "requiredFields": ["attributeName"],
+      "optionalFields": []
+    },
+    "aria": {
+      "description": "Snapshot of aria attributes: aria-pressed, aria-expanded, aria-selected, aria-label, aria-checked.",
+      "scope": "element",
+      "playwrightExecution": "locator.evaluate(el => ({ pressed: el.getAttribute('aria-pressed'), expanded: el.getAttribute('aria-expanded'), selected: el.getAttribute('aria-selected'), label: el.getAttribute('aria-label'), checked: el.getAttribute('aria-checked') }))",
+      "requiredFields": [],
+      "optionalFields": []
+    },
+    "screenshot": {
+      "description": "PNG screenshot of the element bounding box (base64 encoded).",
+      "scope": "element",
+      "playwrightExecution": "locator.screenshot()",
+      "requiredFields": [],
+      "optionalFields": []
+    },
+    "url": {
+      "description": "Current page URL string.",
+      "scope": "page",
+      "playwrightExecution": "page.url()",
+      "requiredFields": [],
+      "optionalFields": []
+    },
+    "scrollY": {
+      "description": "Current vertical scroll position (window.scrollY).",
+      "scope": "page",
+      "playwrightExecution": "page.evaluate(() => window.scrollY)",
+      "requiredFields": [],
+      "optionalFields": []
+    },
+    "visible": {
+      "description": "Boolean: whether the element is currently visible.",
+      "scope": "element",
+      "playwrightExecution": "locator.isVisible()",
+      "requiredFields": [],
+      "optionalFields": []
+    }
+  }
+}

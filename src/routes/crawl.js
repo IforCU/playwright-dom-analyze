@@ -45,8 +45,8 @@
  */
 
 import { Router } from 'express';
-import { runCrawl }      from '../core/crawl/crawlRunner.js';
-import { generateJobId } from '../core/utils.js';
+import { runCrawl }      from '../core/qa-analysis/crawl/crawlRunner.js';
+import { generateJobId } from '../core/qa-analysis/utils.js';
 
 const router = Router();
 

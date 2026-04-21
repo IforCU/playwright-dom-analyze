@@ -11,7 +11,7 @@
  */
 
 import express from 'express';
-import { runAudit } from '../core/audit/auditRunner.js';
+import { runAudit } from '../core/qa-analysis/audit/auditRunner.js';
 
 const router = express.Router();
 

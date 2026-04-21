@@ -1,0 +1,69 @@
+{
+  "schemaVersion": "2.0",
+  "description": "Registry defining the observation contract for all supported expectedSignal types.",
+  "signals": {
+    "urlChanged": {
+      "description": "Page URL must change after the step action completes.",
+      "required": true,
+      "defaultTimeoutMs": 7000,
+      "fields": [],
+      "observationMethod": "page.waitForURL(url => url.href !== urlBefore, { timeout })",
+      "failureBlocks": true,
+      "failureMessage": "Expected URL to change but it did not"
+    },
+    "urlChangedOptional": {
+      "description": "Page URL may or may not change. Observation is informational.",
+      "required": false,
+      "defaultTimeoutMs": 3000,
+      "fields": [],
+      "observationMethod": "page.waitForURL (non-blocking, swallowed on timeout)",
+      "failureBlocks": false,
+      "failureMessage": null
+    },
+    "networkRequest": {
+      "description": "A network request matching urlContains is expected to be issued.",
+      "required": false,
+      "defaultTimeoutMs": 5000,
+      "fields": ["urlContains"],
+      "observationMethod": "page.waitForRequest(req => req.url().includes(urlContains), { timeout })",
+      "failureBlocks": false,
+      "failureMessage": "No matching network request observed"
+    },
+    "domChanged": {
+      "description": "DOM must change (MutationObserver detects childList/attributes/characterData change).",
+      "required": true,
+      "defaultTimeoutMs": 5000,
+      "fields": [],
+      "observationMethod": "MutationObserver on document.body (childList+subtree+attributes+characterData)",
+      "failureBlocks": true,
+      "failureMessage": "Expected DOM to change but no mutation was observed"
+    },
+    "domChangedOptional": {
+      "description": "DOM may or may not change. Observation is informational.",
+      "required": false,
+      "defaultTimeoutMs": 3000,
+      "fields": [],
+      "observationMethod": "MutationObserver (non-blocking)",
+      "failureBlocks": false,
+      "failureMessage": null
+    },
+    "scrollChanged": {
+      "description": "Page scroll position (window.scrollY) must change after the step.",
+      "required": false,
+      "defaultTimeoutMs": 3000,
+      "fields": [],
+      "observationMethod": "poll window.scrollY every 150ms until change or timeout",
+      "failureBlocks": false,
+      "failureMessage": "Scroll position did not change"
+    },
+    "elementVisible": {
+      "description": "Target element becomes visible after the step.",
+      "required": false,
+      "defaultTimeoutMs": 5000,
+      "fields": ["targetRef"],
+      "observationMethod": "locator.waitFor({ state: 'visible', timeout })",
+      "failureBlocks": false,
+      "failureMessage": "Element did not become visible"
+    }
+  }
+}

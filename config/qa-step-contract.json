@@ -1,0 +1,148 @@
+{
+  "schemaVersion": "2.0",
+  "description": "Execution contract for every supported QA scenario step type. The engine MUST reject any step type not listed here.",
+  "stepTypes": {
+    "goto": {
+      "description": "Navigate the page to a URL. Resolves relative URLs against environment.baseURL.",
+      "requiredFields": ["url"],
+      "optionalFields": ["timeoutMs", "waitUntil"],
+      "targetRequired": false,
+      "playwrightExecution": "page.goto(resolvedUrl, { timeout, waitUntil })",
+      "navigates": true,
+      "autoCapturesPreClickState": false,
+      "defaultWaitUntil": "domcontentloaded",
+      "screenshotAttachedByDefault": false,
+      "allowedSignals": ["urlChanged", "networkRequest"]
+    },
+    "fill": {
+      "description": "Clear and fill an input element with a resolved value string.",
+      "requiredFields": ["targetRef", "input"],
+      "optionalFields": ["resolution", "timeoutMs", "expectedSignals"],
+      "targetRequired": true,
+      "playwrightExecution": "locator.fill(interpolatedValue, { timeout })",
+      "navigates": false,
+      "autoCapturesPreClickState": false,
+      "screenshotAttachedByDefault": false,
+      "allowedSignals": ["elementVisible", "networkRequest", "domChanged"]
+    },
+    "click": {
+      "description": "Click a resolved element. If urlChanged signal is declared, wraps in waitForURL.",
+      "requiredFields": ["targetRef"],
+      "optionalFields": ["resolution", "timeoutMs", "expectedSignals"],
+      "targetRequired": true,
+      "playwrightExecution": "locator.click({ timeout })",
+      "navigates": false,
+      "autoCapturesPreClickState": true,
+      "screenshotAttachedByDefault": false,
+      "allowedSignals": ["urlChanged", "urlChangedOptional", "networkRequest", "domChanged", "domChangedOptional", "scrollChanged"]
+    },
+    "expect": {
+      "description": "Assert a condition using a registered matcher. Does not interact with the page.",
+      "requiredFields": ["assertion"],
+      "optionalFields": ["targetRef", "resolution", "timeoutMs"],
+      "targetRequired": false,
+      "playwrightExecution": "assertionExecutor.run(assertion, page, context)",
+      "navigates": false,
+      "autoCapturesPreClickState": false,
+      "screenshotAttachedByDefault": false,
+      "allowedSignals": []
+    },
+    "capture": {
+      "description": "Capture a value from an element or the page and store it in runtime.captured under saveAs key.",
+      "requiredFields": ["targetRef"],
+      "optionalFields": ["capture", "saveAs", "resolution", "timeoutMs"],
+      "targetRequired": true,
+      "playwrightExecution": "captureExecutor.run(capture, locator, page, context)",
+      "navigates": false,
+      "autoCapturesPreClickState": false,
+      "screenshotAttachedByDefault": false,
+      "allowedSignals": [],
+      "notes": "Legacy: top-level saveAs with no capture object defaults to kind=text."
+    },
+    "scroll": {
+      "description": "Scroll the page by a number of pixels in a direction. Page-level action.",
+      "requiredFields": ["scroll"],
+      "optionalFields": ["timeoutMs"],
+      "targetRequired": false,
+      "playwrightExecution": "page.evaluate((px) => window.scrollBy(0, px), pixels)",
+      "navigates": false,
+      "autoCapturesPreClickState": false,
+      "screenshotAttachedByDefault": false,
+      "allowedSignals": ["scrollChanged"],
+      "scrollFields": {
+        "direction": { "type": "string", "enum": ["up", "down", "left", "right"], "required": true },
+        "pixels": { "type": "number", "required": true }
+      }
+    },
+    "scrollToElement": {
+      "description": "Scroll the resolved element into the viewport.",
+      "requiredFields": ["targetRef"],
+      "optionalFields": ["resolution", "timeoutMs"],
+      "targetRequired": true,
+      "playwrightExecution": "locator.scrollIntoViewIfNeeded({ timeout })",
+      "navigates": false,
+      "autoCapturesPreClickState": false,
+      "screenshotAttachedByDefault": false,
+      "allowedSignals": ["scrollChanged"]
+    },
+    "waitFor": {
+      "description": "Wait for a condition: element visibility, a duration, or a network event.",
+      "requiredFields": [],
+      "optionalFields": ["targetRef", "resolution", "waitFor", "timeoutMs"],
+      "targetRequired": false,
+      "playwrightExecution": "locator.waitFor({ state: 'visible', timeout }) OR page.waitForTimeout(ms)",
+      "navigates": false,
+      "autoCapturesPreClickState": false,
+      "screenshotAttachedByDefault": false,
+      "allowedSignals": ["elementVisible", "networkRequest", "domChanged"],
+      "waitForFields": {
+        "kind": { "type": "string", "enum": ["visible", "hidden", "attached", "detached", "timeout"], "required": true },
+        "ms": { "type": "number", "description": "Only for kind=timeout" }
+      }
+    },
+    "select": {
+      "description": "Select an option in a <select> element by value, label, or index.",
+      "requiredFields": ["targetRef", "input"],
+      "optionalFields": ["resolution", "timeoutMs", "expectedSignals"],
+      "targetRequired": true,
+      "playwrightExecution": "locator.selectOption(input.value, { timeout })",
+      "navigates": false,
+      "autoCapturesPreClickState": false,
+      "screenshotAttachedByDefault": false,
+      "allowedSignals": ["domChanged"]
+    },
+    "check": {
+      "description": "Ensure a checkbox or radio is checked.",
+      "requiredFields": ["targetRef"],
+      "optionalFields": ["resolution", "timeoutMs", "expectedSignals"],
+      "targetRequired": true,
+      "playwrightExecution": "locator.check({ timeout })",
+      "navigates": false,
+      "autoCapturesPreClickState": false,
+      "screenshotAttachedByDefault": false,
+      "allowedSignals": ["domChanged"]
+    },
+    "uncheck": {
+      "description": "Ensure a checkbox is unchecked.",
+      "requiredFields": ["targetRef"],
+      "optionalFields": ["resolution", "timeoutMs", "expectedSignals"],
+      "targetRequired": true,
+      "playwrightExecution": "locator.uncheck({ timeout })",
+      "navigates": false,
+      "autoCapturesPreClickState": false,
+      "screenshotAttachedByDefault": false,
+      "allowedSignals": ["domChanged"]
+    },
+    "press": {
+      "description": "Press a keyboard key. If targetRef is present, focuses that element first.",
+      "requiredFields": ["key"],
+      "optionalFields": ["targetRef", "resolution", "timeoutMs", "expectedSignals"],
+      "targetRequired": false,
+      "playwrightExecution": "locator.press(key) OR page.keyboard.press(key)",
+      "navigates": false,
+      "autoCapturesPreClickState": false,
+      "screenshotAttachedByDefault": false,
+      "allowedSignals": ["urlChanged", "domChanged", "networkRequest"]
+    }
+  }
+}

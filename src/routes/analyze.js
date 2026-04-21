@@ -30,8 +30,8 @@
  */
 
 import { Router } from 'express';
-import { runAnalysis }  from '../core/runAnalysis.js';
-import { generateJobId } from '../core/utils.js';
+import { runAnalysis }  from '../core/qa-analysis/runAnalysis.js';
+import { generateJobId } from '../core/qa-analysis/utils.js';
 
 const router = Router();
 

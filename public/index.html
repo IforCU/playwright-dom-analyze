@@ -343,6 +343,104 @@
       margin-top: 12px; transition: background 0.15s;
     }
     .crawl-viz-link:hover { background: #1e3a5f; }
+
+    /* ── QA panel ────────────────────────────────────────────────────────────── */
+    textarea {
+      width: 100%; padding: 10px 14px;
+      background: #0f1117; border: 1px solid #2d3348;
+      border-radius: 8px; color: #e2e8f0;
+      font-size: 0.82rem; font-family: 'SF Mono', 'Fira Code', monospace;
+      outline: none; transition: border-color 0.15s;
+      resize: vertical; min-height: 160px; line-height: 1.5;
+    }
+    textarea:focus { border-color: #6366f1; }
+    textarea::placeholder { color: #334155; }
+
+    .qa-opts {
+      display: flex; gap: 10px; flex-wrap: wrap; align-items: center;
+      margin-top: 10px;
+    }
+    .qa-opts label {
+      display: flex; align-items: center; gap: 6px;
+      font-size: 0.8rem; color: #64748b;
+      text-transform: none; letter-spacing: 0; font-weight: 400;
+      cursor: pointer;
+    }
+    .qa-opts input[type=checkbox] { width: 14px; height: 14px; cursor: pointer; accent-color: #6366f1; }
+
+    #qa-btn-validate {
+      background: transparent; color: #6366f1;
+      border: 1px solid #6366f1;
+    }
+    #qa-btn-validate:not(:disabled):hover { background: #6366f122; }
+    #qa-btn-run {
+      background: #6366f1; color: #fff;
+    }
+    #qa-btn-run:not(:disabled):hover { background: #4f46e5; }
+    #qa-btn-clear { background: transparent; color: #64748b; border: 1px solid #2d3348; }
+    #qa-btn-clear:not(:disabled):hover { color: #94a3b8; border-color: #475569; }
+
+    .scenario-grid {
+      display: flex; flex-direction: column; gap: 8px; margin-top: 14px;
+    }
+    .scenario-card {
+      background: #0f1117; border: 1px solid #2d3348;
+      border-radius: 8px; overflow: hidden;
+    }
+    .sc-header {
+      padding: 12px 14px;
+      display: flex; justify-content: space-between; align-items: center;
+      cursor: pointer; user-select: none;
+    }
+    .sc-header:hover { background: #1a1f2e; }
+    .toggle-icon { font-size: 0.7rem; color: #475569; }
+    .scenario-card.sc-passed { border-left: 3px solid #22c55e; }
+    .scenario-card.sc-failed { border-left: 3px solid #ef4444; }
+    .scenario-card.sc-skipped { border-left: 3px solid #3b82f6; }
+    .scenario-card.sc-blocked { border-left: 3px solid #f97316; }
+    .sc-id { font-size: 0.82rem; font-weight: 600; color: #e2e8f0; }
+    .sc-name { font-size: 0.72rem; color: #64748b; }
+    .sc-stats { font-size: 0.72rem; color: #64748b; margin-top: 4px; }
+    .sc-stats span { color: #94a3b8; }
+    .sc-status-badge {
+      padding: 3px 9px; border-radius: 4px;
+      font-size: 0.7rem; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 0.05em;
+    }
+    .sc-status-badge.passed  { background: #14532d; color: #4ade80; }
+    .sc-status-badge.failed  { background: #450a0a; color: #f87171; }
+    .sc-status-badge.skipped { background: #1e3a5f; color: #60a5fa; }
+    .sc-status-badge.blocked { background: #431407; color: #fb923c; }
+    .sc-steps {
+      border-top: 1px solid #1e293b;
+      padding: 8px 14px 10px;
+      display: flex; flex-direction: column; gap: 4px;
+    }
+    .step-row {
+      display: grid;
+      grid-template-columns: 16px 120px 1fr 60px 50px;
+      gap: 0 8px; align-items: start;
+      font-size: 0.7rem; padding: 4px 0;
+      border-bottom: 1px solid #1a1f2e;
+    }
+    .step-row:last-child { border-bottom: none; }
+    .step-icon { font-size: 0.75rem; }
+    .step-id { color: #60a5fa; font-family: monospace; font-size: 0.65rem; word-break: break-all; }
+    .step-name { color: #cbd5e1; }
+    .step-type { color: #475569; font-size: 0.65rem; }
+    .step-dur { color: #64748b; font-size: 0.65rem; text-align: right; }
+    .st-detail {
+      grid-column: 2 / -1;
+      font-size: 0.65rem; color: #64748b;
+      line-height: 1.5; padding-left: 2px;
+    }
+    .st-detail code { background: #1e293b; padding: 0 3px; border-radius: 2px; color: #94a3b8; }
+    .st-detail em { color: #f97316; font-style: normal; }
+
+    .validate-ok   { background: #0d2b1a; border: 1px solid #166534; border-radius: 8px; padding: 10px 14px; font-size: 0.8rem; color: #4ade80; margin-top: 12px; }
+    .validate-fail { background: #1f0a0a; border: 1px solid #991b1b; border-radius: 8px; padding: 10px 14px; font-size: 0.8rem; color: #f87171; margin-top: 12px; }
+    .validate-fail ul { margin: 6px 0 0 16px; }
+    .validate-fail ul li { margin-bottom: 2px; }
   </style>
 </head>
 <body>
@@ -351,8 +449,9 @@
 <p class="subtitle">로컬 Playwright DOM 탐색 엔진</p>
 
 <div class="tabs">
-  <button class="tab-btn active" id="tab-analyze-btn" onclick="switchTab('analyze')">&#128196; 단일 페이지 분석</button>
-  <button class="tab-btn" id="tab-crawl-btn" onclick="switchTab('crawl')">&#128578; BFS 크롤 탐색</button>
+  <button class="tab-btn active" id="tab-analyze-btn" onclick="switchTab('analyze')">&#128196; 단일 분석</button>
+  <button class="tab-btn" id="tab-crawl-btn" onclick="switchTab('crawl')">&#128578; BFS 크롤</button>
+  <button class="tab-btn" id="tab-qa-btn" onclick="switchTab('qa')">&#9654; QA 실행</button>
 </div>
 
 <div id="panel-analyze" class="tab-panel">
@@ -539,6 +638,111 @@
 </div>
 </div><!-- end #panel-crawl -->
 
+<!-- QA Execution panel -->
+<div id="panel-qa" class="tab-panel" style="display:none">
+<div class="card">
+  <label for="qa-suite-json">QA Suite JSON</label>
+  <textarea id="qa-suite-json" rows="10" placeholder='{
+  "suiteId": "my-suite",
+  "baseURL": "https://example.com",
+  "analysisJobId": "2026-04-21T04-47-52-64fa4efa",
+  "scenarios": [ ... ]
+}'></textarea>
+  <p class="hint">qa-suite-example.json 파일 내용을 붙여넣으세요.</p>
+
+  <label for="qa-scenario-ids" style="margin-top:4px">scenarioIds <span style="color:#334155;font-weight:400;text-transform:none">(선택 · 쉼표로 구분, 생략 시 전체 실행)</span></label>
+  <input id="qa-scenario-ids" type="text" placeholder="SEARCH-001, NAV-002" />
+
+  <details style="margin-top:14px">
+    <summary>자격증명 (선택)</summary>
+    <div class="detail-body">
+      <div class="field">
+        <label for="qa-cred-user">사용자명</label>
+        <input id="qa-cred-user" type="text" placeholder="username or email" autocomplete="username" />
+      </div>
+      <div class="field">
+        <label for="qa-cred-pass">비밀번호</label>
+        <input id="qa-cred-pass" type="password" placeholder="password" autocomplete="current-password" />
+      </div>
+    </div>
+  </details>
+
+  <div class="qa-opts">
+    <label><input id="qa-headless" type="checkbox" checked /> 헤드리스 모드</label>
+    <label><input id="qa-stop-on-fail" type="checkbox" /> 첫 실패 시 중단</label>
+  </div>
+
+  <div class="row">
+    <button id="qa-btn-validate">&#10003; 유효성 검사</button>
+    <button id="qa-btn-run">&#9654; QA 실행</button>
+    <button id="qa-btn-clear">초기화</button>
+    <span id="qa-elapsed" style="font-size:0.75rem;color:#475569;margin-left:auto;display:none"></span>
+  </div>
+
+  <div class="status-bar">
+    <span class="dot dot-idle" id="qa-dot"></span>
+    <span id="qa-status-text">대기 중</span>
+  </div>
+
+  <div id="qa-validate-result" style="display:none"></div>
+</div>
+
+<div id="qa-result-area" style="display:none;margin-top:0">
+  <div class="divider" style="margin-top:16px"></div>
+
+  <div class="crawl-summary" style="grid-template-columns:repeat(3,1fr)">
+    <div class="cs-card">
+      <div class="cs-label">스위트 상태</div>
+      <div class="cs-value" id="qa-suite-status" style="font-size:0.9rem">—</div>
+      <div class="cs-sub"></div>
+    </div>
+    <div class="cs-card">
+      <div class="cs-label">시나리오</div>
+      <div class="cs-value" id="qa-total-scenarios">—</div>
+      <div class="cs-sub">총</div>
+    </div>
+    <div class="cs-card">
+      <div class="cs-label">통과 / 실패</div>
+      <div class="cs-value" id="qa-pass-fail">—</div>
+      <div class="cs-sub">시나리오</div>
+    </div>
+    <div class="cs-card">
+      <div class="cs-label">Run ID</div>
+      <div class="cs-value" id="qa-run-id" style="font-size:0.6rem;word-break:break-all;line-height:1.4">—</div>
+      <div class="cs-sub"></div>
+    </div>
+    <div class="cs-card">
+      <div class="cs-label">출력 경로</div>
+      <div class="cs-value" id="qa-output" style="font-size:0.6rem;word-break:break-all;line-height:1.4">—</div>
+      <div class="cs-sub"></div>
+    </div>
+    <div class="cs-card">
+      <div class="cs-label">소요 시간</div>
+      <div class="cs-value" id="qa-duration">—</div>
+      <div class="cs-sub">초</div>
+    </div>
+  </div>
+
+  <div class="scenario-grid" id="qa-scenario-grid"></div>
+
+  <div class="result-block" id="qa-log-section" style="margin-top:12px;display:none">
+    <div class="result-header">
+      <span>실행 로그</span>
+      <span class="badge badge-done">log</span>
+    </div>
+    <pre id="qa-exec-log" style="font-size:0.65rem;line-height:1.6;max-height:320px;overflow-y:auto;white-space:pre-wrap;color:#94a3b8"></pre>
+  </div>
+
+  <div class="result-block" style="margin-top:12px">
+    <div class="result-header">
+      <span>응답 JSON</span>
+      <span class="badge" id="qa-result-badge">—</span>
+    </div>
+    <pre id="qa-result-json"></pre>
+  </div>
+</div>
+</div><!-- end #panel-qa -->
+
 <!-- History -->
 <div id="history">
   <div class="history-title">최근 요청</div>
@@ -712,10 +916,271 @@
   function switchTab(tab) {
     document.getElementById('panel-analyze').style.display = tab === 'analyze' ? '' : 'none';
     document.getElementById('panel-crawl').style.display   = tab === 'crawl'   ? '' : 'none';
+    document.getElementById('panel-qa').style.display      = tab === 'qa'      ? '' : 'none';
     document.getElementById('tab-analyze-btn').classList.toggle('active', tab === 'analyze');
     document.getElementById('tab-crawl-btn').classList.toggle('active',   tab === 'crawl');
+    document.getElementById('tab-qa-btn').classList.toggle('active',      tab === 'qa');
   }
   window.switchTab = switchTab;
+
+  // ── QA Execution ────────────────────────────────────────────────────────────
+  document.getElementById('qa-btn-validate').addEventListener('click', qaValidate);
+  document.getElementById('qa-btn-run').addEventListener('click', qaRun);
+  document.getElementById('qa-btn-clear').addEventListener('click', qaClear);
+
+  function parseQaSuite() {
+    const raw = document.getElementById('qa-suite-json').value.trim();
+    if (!raw) return null;
+    try { return JSON.parse(raw); } catch { return null; }
+  }
+
+  async function qaValidate() {
+    const suite = parseQaSuite();
+    const vr = document.getElementById('qa-validate-result');
+    if (!suite) {
+      vr.style.display = 'block';
+      vr.className = 'validate-fail';
+      vr.textContent = 'JSON 파싱 오류: 올바른 JSON을 입력하세요.';
+      return;
+    }
+    vr.style.display = 'none';
+    setQaState('running', '유효성 검사 중…');
+    document.getElementById('qa-btn-validate').disabled = true;
+    document.getElementById('qa-btn-run').disabled = true;
+
+    let data;
+    try {
+      const res = await fetch('/qa/validate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ suite }),
+      });
+      data = await res.json();
+    } catch (err) {
+      data = { valid: false, errors: [err.message], warnings: [] };
+    }
+
+    if (data.valid) {
+      vr.className = 'validate-ok';
+      vr.innerHTML = `&#10003; 유효 (경고 ${(data.warnings ?? []).length}개)`
+        + ((data.warnings ?? []).length
+          ? '<ul>' + data.warnings.map(w => `<li>${esc(w)}</li>`).join('') + '</ul>'
+          : '');
+    } else {
+      vr.className = 'validate-fail';
+      vr.innerHTML = `&#10007; 오류 ${(data.errors ?? []).length}개`
+        + '<ul>' + (data.errors ?? []).map(e => `<li>${esc(e)}</li>`).join('') + '</ul>';
+    }
+    vr.style.display = 'block';
+    setQaState('idle', '검사 완료');
+    document.getElementById('qa-btn-validate').disabled = false;
+    document.getElementById('qa-btn-run').disabled = false;
+  }
+
+  async function qaRun() {
+    const suite = parseQaSuite();
+    if (!suite) {
+      const vr = document.getElementById('qa-validate-result');
+      vr.style.display = 'block'; vr.className = 'validate-fail';
+      vr.textContent = 'JSON 파싱 오류: 올바른 JSON을 입력하세요.';
+      return;
+    }
+
+    const scenarioIdsRaw = document.getElementById('qa-scenario-ids').value.trim();
+    const scenarioIds = scenarioIdsRaw
+      ? scenarioIdsRaw.split(',').map(s => s.trim()).filter(Boolean)
+      : null;
+    const credUser = document.getElementById('qa-cred-user').value.trim();
+    const credPass = document.getElementById('qa-cred-pass').value;
+    const credentials = credUser ? { username: credUser, password: credPass } : {};
+    const headless    = document.getElementById('qa-headless').checked;
+    const stopOnFail  = document.getElementById('qa-stop-on-fail').checked;
+
+    setQaState('running', 'QA 실행 중 … (브라우저 기동 중)');
+    document.getElementById('qa-result-area').style.display = 'none';
+    document.getElementById('qa-btn-run').disabled = true;
+    document.getElementById('qa-btn-validate').disabled = true;
+    const qaEl = document.getElementById('qa-elapsed');
+    qaEl.style.display = 'none';
+
+    const body = { suite, credentials, headless, stopOnFailure: stopOnFail };
+    if (scenarioIds) body.scenarioIds = scenarioIds;
+
+    const t0 = Date.now();
+    let data, ok;
+    try {
+      const res = await fetch('/qa/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      data = await res.json();
+      ok   = res.ok;
+    } catch (err) {
+      data = { error: err.message };
+      ok   = false;
+    }
+
+    const ms = Date.now() - t0;
+    qaEl.textContent = `${(ms / 1000).toFixed(1)}s`;
+    qaEl.style.display = 'inline';
+
+    const suiteStatus = data.status ?? (ok ? 'passed' : 'error');
+    setQaState(suiteStatus === 'passed' ? 'done' : 'error',
+      ok ? `완료: ${suiteStatus}` : `오류: ${data.error ?? '알 수 없음'}`);
+    renderQaResult(data, ok);
+    document.getElementById('qa-btn-run').disabled = false;
+    document.getElementById('qa-btn-validate').disabled = false;
+  }
+
+  function renderQaResult(data, ok) {
+    const area = document.getElementById('qa-result-area');
+    area.style.display = 'block';
+
+    const report = data.suiteReport ?? {};
+    const sum    = report.summary ?? {};
+
+    // Status display
+    const statusEl = document.getElementById('qa-suite-status');
+    const st = data.status ?? (ok ? 'passed' : 'error');
+    statusEl.textContent = st;
+    statusEl.style.color = st === 'passed' ? '#4ade80' : st === 'failed' ? '#f87171' : '#fb923c';
+
+    document.getElementById('qa-total-scenarios').textContent = sum.totalScenarios ?? '—';
+    document.getElementById('qa-pass-fail').textContent =
+      sum.passed != null ? `${sum.passed} / ${sum.failed ?? 0}` : '—';
+    document.getElementById('qa-run-id').textContent    = data.runId ?? '—';
+    document.getElementById('qa-output').textContent    = data.outputPath ?? '—';
+    document.getElementById('qa-duration').textContent  =
+      report.durationMs != null ? (report.durationMs / 1000).toFixed(1) : '—';
+
+    // Scenario cards
+    const grid = document.getElementById('qa-scenario-grid');
+    const scenarios = report.scenarioReports ?? [];
+    if (scenarios.length) {
+      grid.innerHTML = scenarios.map((sr, si) => {
+        const s = sr.summary ?? {};
+        const cls = sr.status ?? 'skipped';
+        const allSteps = [...(sr.preconditionResults ?? []), ...(sr.stepResults ?? [])];
+        const stepsHtml = allSteps.map(st => {
+          const icon = st.status === 'passed' ? '✔' : st.status === 'failed' ? '✘' : '⏭';
+          const color = st.status === 'passed' ? '#4ade80' : st.status === 'failed' ? '#f87171' : '#94a3b8';
+          let detail = '';
+          if (st.resolutionResult?.method) {
+            const r = st.resolutionResult;
+            if (r.method === 'failed') {
+              detail += `<div class="st-detail" style="color:#f87171">⚠ locator resolution 실패</div>`;
+            } else {
+              detail += `<div class="st-detail">📍 ${esc(r.method)}  <code>${esc(r.locatorKind)}="${esc(r.locatorValue ?? '')}"</code>  cnt=${r.resolvedElementCount}${r.wasFallbackUsed ? ' <em>[fallback]</em>' : ''}</div>`;
+            }
+          }
+          if (st.capturedOutput?.saveAs) {
+            const val = st.capturedOutput.value;
+            const display = typeof val === 'object' ? JSON.stringify(val) : String(val ?? '');
+            detail += `<div class="st-detail">📌 captured.<b>${esc(st.capturedOutput.saveAs)}</b> = ${esc(display.slice(0, 80))}</div>`;
+          }
+          if (st.assertionResult && !st.assertionResult.passed) {
+            detail += `<div class="st-detail" style="color:#fb923c">기대: ${esc(JSON.stringify(st.assertionResult.expected))}  실제: ${esc(JSON.stringify(st.assertionResult.actual))}</div>`;
+          }
+          if (st.assertionResult?.passed) {
+            detail += `<div class="st-detail" style="color:#4ade80">✔ assertion passed</div>`;
+          }
+          if (st.expectedSignalResults?.length) {
+            detail += st.expectedSignalResults.map(sig => {
+              const sk = sig.passed ? '✔' : (sig.required ? '✘' : '○');
+              const sc = sig.passed ? '#4ade80' : (sig.required ? '#f87171' : '#94a3b8');
+              return `<div class="st-detail" style="color:${sc}">signal ${sk} ${esc(sig.type)}: observed=${sig.observed}</div>`;
+            }).join('');
+          }
+          if (st.error) {
+            detail += `<div class="st-detail" style="color:#f87171">⚠ ${esc(st.error)}</div>`;
+          }
+          return `<div class="step-row">
+            <span class="step-icon" style="color:${color}">${icon}</span>
+            <span class="step-id">${esc(st.stepId ?? st.type ?? '')}</span>
+            <span class="step-name">${esc(st.name ?? '')}</span>
+            <span class="step-type">${esc(st.type ?? '')}</span>
+            <span class="step-dur">${st.durationMs != null ? st.durationMs + 'ms' : ''}</span>
+            ${detail}
+          </div>`;
+        }).join('');
+        const videoHtml = sr.videoPath
+          ? `<div class="st-detail" style="color:#60a5fa">🎬 영상: ${esc(sr.videoPath)}</div>`
+          : '';
+        return `<div class="scenario-card sc-${cls}">
+          <div class="sc-header" onclick="toggleSteps('sc-steps-${si}',this)">
+            <div>
+              <div class="sc-id">${esc(sr.scenarioId ?? '—')}</div>
+              <div class="sc-name">${esc(sr.scenarioName ?? sr.title ?? '')}</div>
+              <div class="sc-stats">
+                스텝: <span>${s.total ?? 0}</span>개 &nbsp;
+                &#10003; <span style="color:#4ade80">${s.passed ?? 0}</span>
+                &#10007; <span style="color:#f87171">${s.failed ?? 0}</span>
+                ${s.skipped ? `&nbsp;skip <span>${s.skipped}</span>` : ''}
+                &nbsp;&nbsp;avg <span>${s.averageStepDurationMs ?? 0}ms</span>
+              </div>
+              ${videoHtml}
+            </div>
+            <div style="display:flex;align-items:center;gap:8px">
+              <div class="sc-status-badge ${cls}">${cls}</div>
+              <span class="toggle-icon">▼</span>
+            </div>
+          </div>
+          <div class="sc-steps" id="sc-steps-${si}">${stepsHtml}</div>
+        </div>`;
+      }).join('');
+    } else {
+      grid.innerHTML = '';
+    }
+
+    // Execution log
+    const logBox = document.getElementById('qa-exec-log');
+    if (data.executionLog?.length) {
+      logBox.textContent = data.executionLog.join('\n');
+      document.getElementById('qa-log-section').style.display = '';
+    } else {
+      document.getElementById('qa-log-section').style.display = 'none';
+    }
+
+    // Badge + JSON
+    const badge = document.getElementById('qa-result-badge');
+    badge.className = `badge ${ok ? 'badge-done' : 'badge-error'}`;
+    badge.textContent = ok ? 'done' : 'error';
+    document.getElementById('qa-result-json').textContent = JSON.stringify(data, null, 2);
+  }
+
+  function setQaState(s, text) {
+    const dotMap = { running: 'running', done: 'done', idle: 'idle', error: 'error', passed: 'done', failed: 'error' };
+    document.getElementById('qa-dot').className = 'dot dot-' + (dotMap[s] ?? 'idle');
+    document.getElementById('qa-status-text').textContent = text;
+  }
+
+  function toggleSteps(id, header) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const icon = header.querySelector('.toggle-icon');
+    if (el.style.display === 'none') {
+      el.style.display = '';
+      if (icon) icon.textContent = '▲';
+    } else {
+      el.style.display = 'none';
+      if (icon) icon.textContent = '▼';
+    }
+  }
+
+  function qaClear() {
+    document.getElementById('qa-suite-json').value = '';
+    document.getElementById('qa-scenario-ids').value = '';
+    document.getElementById('qa-cred-user').value = '';
+    document.getElementById('qa-cred-pass').value = '';
+    document.getElementById('qa-headless').checked = true;
+    document.getElementById('qa-stop-on-fail').checked = false;
+    document.getElementById('qa-result-area').style.display = 'none';
+    document.getElementById('qa-validate-result').style.display = 'none';
+    setQaState('idle', '대기 중');
+    document.getElementById('qa-elapsed').style.display = 'none';
+    document.getElementById('qa-suite-json').focus();
+  }
 
   // ── Crawl form ──────────────────────────────────────────────────────────────────
   const cBtnRun     = document.getElementById('c-btn-run');
