@@ -121,27 +121,27 @@ export async function showStepFocus(page, step, locator) {
       banner.id = BANNER_ID;
       banner.style.cssText = `
         position: fixed;
-        top: 12px;
-        right: 12px;
+        top: 18px;
+        right: 18px;
         z-index: 2147483646;
-        max-width: 480px;
-        padding: 8px 14px;
-        background: rgba(15, 23, 42, 0.92);
+        max-width: 640px;
+        padding: 14px 22px;
+        background: rgba(15, 23, 42, 0.94);
         color: #fff;
-        font: 600 13px/1.35 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-        border-left: 4px solid ${color};
-        border-radius: 6px;
-        box-shadow: 0 4px 14px rgba(0,0,0,0.35);
+        font: 700 18px/1.4 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        border-left: 7px solid ${color};
+        border-radius: 10px;
+        box-shadow: 0 8px 28px rgba(0,0,0,0.45);
         pointer-events: none;
-        animation: __qa_banner_in__ 200ms ease-out;
+        animation: __qa_banner_in__ 220ms ease-out;
       `;
       const safe = (s) => String(s ?? '').replace(/[<>&]/g, c => ({ '<':'&lt;', '>':'&gt;', '&':'&amp;' })[c]);
       banner.innerHTML = `
-        <div style="display:flex; align-items:center; gap:8px;">
-          <span style="background:${color}; color:#0f172a; padding:2px 8px; border-radius:4px; font-size:11px; letter-spacing:0.3px;">${safe(labelKo)}</span>
-          <span style="opacity:0.85; font-size:11px;">${safe(stepId)}</span>
+        <div style="display:flex; align-items:center; gap:12px;">
+          <span style="background:${color}; color:#0f172a; padding:5px 14px; border-radius:6px; font-size:16px; font-weight:800; letter-spacing:0.4px;">${safe(labelKo)}</span>
+          <span style="opacity:0.85; font-size:15px; font-weight:600;">${safe(stepId)}</span>
         </div>
-        ${name ? `<div style="margin-top:4px; font-weight:500; opacity:0.95; font-size:12px;">${safe(name).slice(0, 140)}</div>` : ''}
+        ${name ? `<div style="margin-top:8px; font-weight:600; opacity:0.96; font-size:16px;">${safe(name).slice(0, 160)}</div>` : ''}
       `;
       document.documentElement.appendChild(banner);
 
@@ -151,10 +151,10 @@ export async function showStepFocus(page, step, locator) {
         wrap.id = RING_ID;
         wrap.style.cssText = `
           position: absolute;
-          left: ${bbox.x - 6}px;
-          top: ${bbox.y - 6}px;
-          width: ${bbox.w + 12}px;
-          height: ${bbox.h + 12}px;
+          left: ${bbox.x - 12}px;
+          top: ${bbox.y - 12}px;
+          width: ${bbox.w + 24}px;
+          height: ${bbox.h + 24}px;
           z-index: 2147483645;
           pointer-events: none;
         `;
@@ -163,21 +163,21 @@ export async function showStepFocus(page, step, locator) {
         inner.style.cssText = `
           position: absolute;
           inset: 0;
-          border: 2px solid ${color};
-          border-radius: 6px;
-          box-shadow: 0 0 0 2px rgba(255,255,255,0.55) inset, 0 0 12px ${color};
-          background: ${color}1a;
-          animation: __qa_pulse_inner__ 700ms ease-out alternate infinite;
+          border: 4px solid ${color};
+          border-radius: 10px;
+          box-shadow: 0 0 0 3px rgba(255,255,255,0.6) inset, 0 0 22px ${color};
+          background: ${color}26;
+          animation: __qa_pulse_inner__ 750ms ease-out alternate infinite;
         `;
         // outer 펄스 링
         const outer = document.createElement('div');
         outer.style.cssText = `
           position: absolute;
-          inset: -4px;
-          border: 3px solid ${color};
-          border-radius: 8px;
+          inset: -8px;
+          border: 5px solid ${color};
+          border-radius: 14px;
           opacity: 0;
-          animation: __qa_pulse_ring__ 900ms ease-out infinite;
+          animation: __qa_pulse_ring__ 950ms ease-out infinite;
         `;
         wrap.appendChild(outer);
         wrap.appendChild(inner);

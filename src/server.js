@@ -27,7 +27,7 @@ app.use(express.json({ limit: '50mb' }));
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
 // Serve crawl output artifacts (graphs, screenshots) so crawl-graph.html
-// can be opened directly from the browser at /outputs/{jobId}/crawl-graph.html
+// can be opened directly from the browser at /outputs/web/{jobId}/crawl-graph.html
 app.use('/outputs', express.static(path.join(__dirname, '..', 'outputs')));
 
 // Mount routes

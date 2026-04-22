@@ -1292,8 +1292,6 @@ setTimeout(() => zoomToFit(700), 2400);
  */
 export async function writeCrawlGraphArtifacts({ graph, finalReport, originalUrl, outDir }) {
   const graphData  = buildGraphData(graph, finalReport, originalUrl);
-  const jobDirName = path.basename(outDir);
-
   const jsonPath = path.join(outDir, 'crawl-graph.json');
   const mmdPath  = path.join(outDir, 'crawl-graph.mmd');
   const htmlPath = path.join(outDir, 'crawl-graph.html');
@@ -1310,7 +1308,15 @@ export async function writeCrawlGraphArtifacts({ graph, finalReport, originalUrl
   console.log(`[visualizer] crawl-graph.mmd   (Mermaid flowchart)`);
   console.log(`[visualizer] crawl-graph.html  (interactive 3D force-graph)`);
 
-  const rel = (f) => `outputs/${jobDirName}/${f}`.replace(/\\/g, '/');
+  // outDir 의 절대 경로에서 프로젝트 루트(= outputs 의 부모) 기준 상대 경로를 추출합니다.
+  // outputs/ 가 포함된 위치부터 잘라 쓰면 경로 하드코딩 없이 어디에 저장돼도 올바른
+  // URL 경로를 만들 수 있습니다. (e.g. outputs/web/<jobId>/crawl-graph.html)
+  const normalizedOutDir = outDir.replace(/\\/g, '/');
+  const outputsIdx = normalizedOutDir.lastIndexOf('/outputs/');
+  const relBase = outputsIdx >= 0
+    ? normalizedOutDir.slice(outputsIdx + 1)         // "outputs/web/<jobId>"
+    : `outputs/${path.basename(outDir)}`;             // 만약 경로에 outputs가 없으면 폴백
+  const rel = (f) => `${relBase}/${f}`.replace(/\\/g, '/');
 
   return {
     graphJsonPath:    rel('crawl-graph.json'),

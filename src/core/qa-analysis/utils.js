@@ -8,9 +8,11 @@ import { randomUUID } from 'crypto';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
-// Resolve project root from this file's location (src/core/ → src/ → project root)
+// Resolve project root from this file's location:
+//   src/core/qa-analysis/utils.js  →  '../..'  →  src/  (WRONG — one level too shallow)
+//   Need three levels:  src/core/qa-analysis → src/core → src → project root
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PROJECT_ROOT = path.resolve(__dirname, '..', '..');
+const PROJECT_ROOT = path.resolve(__dirname, '..', '..', '..');
 
 // ── Job ID ─────────────────────────────────────────────────────────────────
 
@@ -22,9 +24,9 @@ export function generateJobId() {
 
 // ── Output paths ───────────────────────────────────────────────────────────
 
-/** Absolute path to outputs/<jobId>/ */
+/** Absolute path to outputs/web/<jobId>/ */
 export function jobOutputDir(jobId) {
-  return path.join(PROJECT_ROOT, 'outputs', jobId);
+  return path.join(PROJECT_ROOT, 'outputs', 'web', jobId);
 }
 
 /** Portable (forward-slash) relative path for JSON storage */

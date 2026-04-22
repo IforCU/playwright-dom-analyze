@@ -33,8 +33,10 @@
 import fs   from 'fs/promises';
 import path from 'path';
 
-const OUTPUTS_DIR = new URL('../../../outputs', import.meta.url).pathname.replace(/^\/([A-Z]:)/, '$1');
-const AUDIT_DIR   = path.join(OUTPUTS_DIR, 'audit');
+// auditRunner.js is at src/core/qa-analysis/audit/ — need 4 levels up to reach project root,
+// then into outputs/web/ (the canonical analysis output base)
+const OUTPUTS_DIR = new URL('../../../../outputs/web', import.meta.url).pathname.replace(/^\/([A-Z]:)/, '$1');
+const AUDIT_DIR   = path.join(new URL('../../../../outputs/audit', import.meta.url).pathname.replace(/^\/([A-Z]:)/, '$1'));
 const CONFIG_DIR  = new URL('../../../config',  import.meta.url).pathname.replace(/^\/([A-Z]:)/, '$1');
 
 // ── Thresholds for detecting quality problems ─────────────────────────────────
