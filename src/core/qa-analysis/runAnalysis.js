@@ -17,6 +17,7 @@ import { MUTATION_TRACKER_SCRIPT,
          installMutationTracker,
          resetMutations }                                from './phase1/mutationTracker.js';
 import { stabilizePage }                                 from './phase1/pageStabilizer.js';
+import { installPopupAutoCloser }                        from '../shared/popupDismisser.js';
 import { checkRenderReadiness,
          inspectFrames }                                 from './phase1/renderReadinessChecker.js';
 import { extractStaticNodes,
@@ -414,6 +415,12 @@ export async function runAnalysis({
       ` dismissed=${stabResult.dismissedCount} hidden=${stabResult.hiddenCount}` +
       ` mediaPaused=${stabResult.pausedMediaCount} ok=${stabResult.stabilizationSucceeded}`
     );
+
+    // Install background popup auto-closer so modals that appear AFTER the
+    // initial stabilization pass (e.g. delayed welcome coupons, cookie banners
+    // triggered by scroll, late-init ad overlays) are cleared automatically
+    // throughout the entire analysis lifetime of this page.
+    installPopupAutoCloser(basePage, { intervalMs: 3000 });
 
     const frameSummary = await inspectFrames(basePage);
     if (CONFIG.OUTPUT_MODE !== 'compact') {

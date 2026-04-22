@@ -32,10 +32,13 @@
  */
 
 import express               from 'express';
+import { readdir, readFile }  from 'node:fs/promises';
+import { join }               from 'node:path';
 import { runScenarioSuite }  from '../core/qa-execution/index.js';
 import { validateSuite }     from '../core/qa/validator.js';
 
 const router = express.Router();
+const QA_RUNS_DIR = 'outputs/qa-runs';
 
 // ── POST /qa/validate ─────────────────────────────────────────────────────────
 router.post('/qa/validate', (req, res) => {
@@ -57,11 +60,12 @@ router.post('/qa/validate', (req, res) => {
 router.post('/qa/run', async (req, res) => {
   const {
     suite,
-    analysisReport = null,
-    scenarioIds    = null,
-    credentials    = {},
-    headless       = true,
-    stopOnFailure  = null,
+    analysisReport       = null,
+    scenarioIds          = null,
+    credentials          = {},
+    headless             = true,
+    stopOnFailure        = null,
+    maxParallelScenarios = null,
   } = req.body ?? {};
 
   if (!suite) {
@@ -78,6 +82,9 @@ router.post('/qa/run', async (req, res) => {
       credentials,
       headless:     headless !== false,
       stopOnFailure,
+      maxParallelScenarios: Number.isFinite(+maxParallelScenarios) && +maxParallelScenarios > 0
+        ? Math.floor(+maxParallelScenarios)
+        : null,
     });
 
     res.json({
@@ -101,6 +108,49 @@ router.post('/qa/run', async (req, res) => {
     }
 
     res.status(500).json({ status: 'error', error: err.message });
+  }
+});
+
+// ── GET /qa/runs ──────────────────────────────────────────────────────────────
+// Returns a list of past QA runs sorted ascending by runId (= time prefix).
+// Each entry contains lightweight metadata read from suite-report.json.
+router.get('/qa/runs', async (_req, res) => {
+  try {
+    let entries;
+    try {
+      entries = await readdir(QA_RUNS_DIR, { withFileTypes: true });
+    } catch {
+      return res.json({ runs: [] }); // directory doesn't exist yet
+    }
+
+    const dirs = entries
+      .filter(e => e.isDirectory())
+      .map(e => e.name)
+      .sort(); // lexicographic = chronological because runId starts with timestamp
+
+    const runs = await Promise.all(dirs.map(async (runId) => {
+      const reportPath = join(QA_RUNS_DIR, runId, 'suite-report.json');
+      try {
+        const raw    = await readFile(reportPath, 'utf8');
+        const report = JSON.parse(raw);
+        return {
+          runId,
+          status:      report.status ?? 'unknown',
+          suiteId:     report.suiteId ?? null,
+          suiteName:   report.suiteName ?? null,
+          startedAt:   report.startedAt ?? null,
+          durationMs:  report.durationMs ?? null,
+          summary:     report.summary ?? {},
+        };
+      } catch {
+        // suite-report.json not yet written (run in progress) or corrupt
+        return { runId, status: 'unknown' };
+      }
+    }));
+
+    res.json({ runs });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 

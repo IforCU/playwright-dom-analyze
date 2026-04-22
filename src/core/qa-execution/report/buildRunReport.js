@@ -50,24 +50,29 @@ export function buildSuiteReport(suite, scenarioReports, startedAt) {
   const finishedAt    = new Date().toISOString();
   const totalScenarios = scenarioReports.length;
   const passed        = scenarioReports.filter(r => r.status === 'passed').length;
+  const partial       = scenarioReports.filter(r => r.status === 'partial').length;
   const failed        = scenarioReports.filter(r => r.status === 'failed').length;
   const skipped       = scenarioReports.filter(r => r.status === 'skipped').length;
   const blocked       = scenarioReports.filter(r => r.status === 'blocked').length;
 
+  // Suite-level status: failed > partial > blocked > passed
+  const suiteStatus = failed > 0 ? 'failed' : partial > 0 ? 'partial' : blocked > 0 ? 'blocked' : 'passed';
+
   return {
     reportVersion:   REPORT_VERSION,
-    runId:           randomUUID(),
+    runId:           `${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}_${randomUUID().slice(0, 8)}`,
     suiteId:         suite?.suiteId ?? null,
     suiteName:       suite?.name ?? suite?.title ?? '',
     baseURL:         suite?.environment?.baseURL ?? suite?.baseURL ?? '',
     analysisJobId:   suite?.analysisJobId ?? suite?.analysisContext?.analysisJobId ?? null,
-    status:          failed > 0 ? 'failed' : (blocked > 0 ? 'blocked' : 'passed'),
+    status:          suiteStatus,
     startedAt,
     finishedAt,
     durationMs:      Date.parse(finishedAt) - Date.parse(startedAt),
     summary: {
       totalScenarios,
       passed,
+      partial,
       failed,
       skipped,
       blocked,
@@ -85,5 +90,7 @@ function deriveScenarioStatus(scenario, allResults, summary) {
   if (anyRequiredFailed) return 'failed';
   if (summary.skipped   === allResults.length) return 'skipped';
   if (summary.blocked   > 0) return 'blocked';
+  // partial: all required steps ultimately passed, but at least one needed retries
+  if (required.some(r => r.status === 'retried_then_passed')) return 'partial';
   return 'passed';
 }

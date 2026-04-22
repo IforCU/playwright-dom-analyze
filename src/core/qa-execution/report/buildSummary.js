@@ -17,7 +17,11 @@ export function buildSummary(stepResults) {
   const errorClassification = Object.fromEntries(ALL_KNOWN_CODES.map(c => [c, 0]));
 
   for (const r of stepResults) {
-    counts[r.status] = (counts[r.status] ?? 0) + 1;
+    // retried_then_passed counts as a passed step in summary totals,
+    // but also increments the 'retried' counter so partial status can be derived.
+    const statusForCount = r.status === 'retried_then_passed' ? 'passed' : r.status;
+    counts[statusForCount] = (counts[statusForCount] ?? 0) + 1;
+    if (r.status === 'retried_then_passed') counts.retried++;
     totalDuration += r.durationMs ?? 0;
 
     if (r.assertionResult != null) {

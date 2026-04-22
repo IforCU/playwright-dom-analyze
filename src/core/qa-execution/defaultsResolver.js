@@ -35,5 +35,12 @@ export function resolveDefaults(suite, scenarioOverrides = {}) {
         ?? false,
     },
     baseURL: scenarioOverrides.baseURL ?? suiteDefaults.baseURL ?? envBaseURL,
+    // Max scenarios executed concurrently (suite-level only — per-scenario
+    // overrides are ignored for this knob since it is a suite-wide budget).
+    maxParallelScenarios:
+      scenarioOverrides.maxParallelScenarios
+      ?? policy.maxParallelScenarios
+      ?? suiteDefaults.maxParallelScenarios
+      ?? parseInt(process.env.QA_MAX_PARALLEL_SCENARIOS || '1', 10),
   };
 }

@@ -15,11 +15,29 @@ export async function executeExpectStep(page, step, state, elementMap, _policy, 
   }
 
   const result = await runAssertion(page, assertion, state, elementMap, defaultTimeout);
+
+  // Soft pass (partial) — matcher accepted the assertion under a relaxed
+  // interpretation (substring match, surrounding-region change, etc.). We map
+  // it to `retried_then_passed` so the scenario report surfaces it as 부분 성공.
+  let status;
+  if (result.passed && result.partial) {
+    status = 'retried_then_passed';
+  } else if (result.passed) {
+    status = 'passed';
+  } else {
+    status = 'failed';
+  }
+
+  const logs = [];
+  if (result.partial && result.partialReason) {
+    logs.push(`[partial] ${result.partialReason}`);
+  }
+
   return {
-    status:          result.passed ? 'passed' : 'failed',
+    status,
     errorCode:       result.errorCode,
     error:           result.error,
     assertionResult: result,
-    logs:            [],
+    logs,
   };
 }

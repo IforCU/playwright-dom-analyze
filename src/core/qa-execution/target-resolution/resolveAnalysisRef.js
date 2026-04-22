@@ -64,7 +64,7 @@ export async function resolveAnalysisRef(page, nodeId, analysisElementMap) {
   if (firstMultiMatch) {
     const { locator, loc, count } = firstMultiMatch;
     return {
-      locator,
+      locator: locator.first(),
       resolutionResult: {
         method:               'analysisRef',
         nodeId,

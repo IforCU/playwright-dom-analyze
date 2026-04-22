@@ -65,7 +65,19 @@ export async function createFreshContext(browser, opts = {}) {
   if (opts.storageState) {
     contextOpts.storageState = opts.storageState;
   }
-  return browser.newContext(contextOpts);
+  const context = await browser.newContext(contextOpts);
+
+  // Block common cookie-consent CDN requests that inject blocking modals.
+  // This prevents 3rd-party cookie libraries from interfering with analysis.
+  try {
+    // Match both http/https hostnames via glob
+    await context.route('**/cdn.cookielaw.org/consent/**', (route) => route.abort());
+  } catch (err) {
+    // non-fatal: routing may fail in older Playwright versions; proceed anyway
+    console.log('[browser] warning: failed to install cookie-consent route', err.message || err);
+  }
+
+  return context;
 }
 
 /**

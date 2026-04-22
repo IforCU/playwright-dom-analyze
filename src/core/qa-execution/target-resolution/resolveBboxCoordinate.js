@@ -39,14 +39,16 @@ export async function resolveBboxCoordinate(page, nodeId, bbox) {
       const el = document.elementFromPoint(vx, vy);
       if (!el || el === document.documentElement || el === document.body) return null;
 
-      // 고유 XPath 생성
+      // 고유 XPath 생성 — 모든 단계에 인덱스를 포함시켜야 일치 요소가 1개로
+      // 보장됩니다. (`/ul/li/a`는 모든 li/a를 매칭하므로 클릭이 strict-mode
+      // 타임아웃을 일으킵니다.)
       function buildXPath(element) {
-        if (element.id && /^[a-zA-Z]/.test(element.id)) {
+        if (element.id && /^[a-zA-Z][\w-]*$/.test(element.id)) {
           return `//*[@id="${element.id}"]`;
         }
         const parts = [];
         let cur = element;
-        while (cur && cur.nodeType === Node.ELEMENT_NODE) {
+        while (cur && cur.nodeType === Node.ELEMENT_NODE && cur !== document.documentElement) {
           const tag = cur.tagName.toLowerCase();
           let idx = 1;
           let sib = cur.previousElementSibling;
@@ -54,10 +56,10 @@ export async function resolveBboxCoordinate(page, nodeId, bbox) {
             if (sib.tagName.toLowerCase() === tag) idx++;
             sib = sib.previousElementSibling;
           }
-          parts.unshift(idx > 1 ? `${tag}[${idx}]` : tag);
+          parts.unshift(`${tag}[${idx}]`);
           cur = cur.parentElement;
         }
-        return '/' + parts.join('/');
+        return '/html/' + parts.join('/');
       }
 
       return buildXPath(el);
@@ -65,9 +67,14 @@ export async function resolveBboxCoordinate(page, nodeId, bbox) {
 
     if (!xpath) return null;
 
-    const locator = page.locator(`xpath=${xpath}`);
-    const count   = await safeCount(locator);
+    let locator = page.locator(`xpath=${xpath}`);
+    let count   = await safeCount(locator);
     if (count === 0) return null;
+    // 안전망: 동일 XPath가 여러 요소에 매칭되면 (xpath가 충분히 고유하지 않은
+    // 드문 경우) `.first()`로 좁혀서 strict-mode 타임아웃을 방지합니다.
+    if (count > 1) {
+      locator = locator.first();
+    }
 
     return {
       locator,

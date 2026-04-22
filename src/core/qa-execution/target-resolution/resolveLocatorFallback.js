@@ -14,9 +14,12 @@ export async function resolveLocatorFallback(page, locatorFallback, nodeId = nul
 
   for (const fb of candidates) {
     if (!fb?.strategy || !fb?.value) continue;
-    const locator = buildLocator(page, fb.strategy, fb.value);
-    const count   = await safeCount(locator);
+    let locator = buildLocator(page, fb.strategy, fb.value);
+    const count = await safeCount(locator);
     if (count > 0) {
+      // 안전망: 폴백 셀렉터가 여러 요소에 매칭되면 strict-mode 위반을
+      // 방지하기 위해 첫 번째 요소로 좁힙니다.
+      if (count > 1) locator = locator.first();
       return {
         locator,
         resolutionResult: {

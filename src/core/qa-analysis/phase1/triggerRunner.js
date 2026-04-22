@@ -50,6 +50,7 @@ import { computeTriggerDelta, extractNewRegions }                  from '../comp
 import { sleep }                                                   from '../utils.js';
 import { isInAutoDynamicRegion, freezeCssAnimations }              from './autoDynamicDetector.js';
 import { classifyAuthNavigation, collectNavPageMeta }               from './authNavigationClassifier.js';
+import { quickDismissPopups }                                        from '../../shared/popupDismisser.js';
 
 // ── Config (env-configurable) ───────────────────────────────────────────────
 // Maximum total time (ms) to wait for DOM mutations to settle after a trigger.
@@ -147,6 +148,14 @@ export async function runTrigger(browser, url, candidate, outDir, opts = {}) {
     if (freezeCss) {
       await freezeCssAnimations(page).catch(() => {});
     }
+
+    // Dismiss any blocking popup/modal that appeared after navigation —
+    // welcome coupons, cookie banners, app-install prompts, etc. — before
+    // taking the before-snapshot and executing the trigger action. This
+    // prevents overlays from occluding the target element and biasing the
+    // DOM delta comparison.
+    await quickDismissPopups(page, { silent: false }).catch(() => {});
+
     await resetMutations(page);
 
     // ── 2. Before-state DOM snapshot (screenshot only in fullPage mode) ────────
@@ -163,6 +172,10 @@ export async function runTrigger(browser, url, candidate, outDir, opts = {}) {
 
     let actionError = null;
     try {
+      // Quick-dismiss immediately before the action in case a new popup
+      // appeared between DOM snapshot and action execution.
+      await quickDismissPopups(page, { silent: true }).catch(() => {});
+
       if (triggerType === 'hover') {
         await page.mouse.move(cx, cy, { steps: 5 });
         // Brief pause lets CSS :hover transitions begin before we start polling.

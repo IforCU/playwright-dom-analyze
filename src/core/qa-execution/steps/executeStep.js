@@ -2,6 +2,7 @@ import { resolveTarget }              from '../target-resolution/resolveTarget.j
 import { setupSignals, collectSignals } from '../signals/waitForSignals.js';
 import { ERROR_CODES }                 from '../errors/errorCodes.js';
 import { normalizePlaywrightError }    from '../errors/normalizePlaywrightError.js';
+import { showStepFocus }               from '../visual/focusIndicator.js';
 
 import { executeGotoStep }          from './executeGotoStep.js';
 import { executeFillStep }          from './executeFillStep.js';
@@ -48,9 +49,10 @@ const HANDLERS = {
  * @param {import('../runtime/runtimeState.js').RuntimeState} state
  * @param {object|null} elementMap
  * @param {object} policy
+ * @param {object} [ctx]           – extra context passed to step handlers (e.g. { outputDir })
  * @returns {Promise<object>}  StepResult
  */
-export async function executeStep(page, step, state, elementMap, policy) {
+export async function executeStep(page, step, state, elementMap, policy, ctx = {}) {
   const startedAt = new Date().toISOString();
   const t0        = Date.now();
   const handler   = HANDLERS[step.type];
@@ -87,10 +89,17 @@ export async function executeStep(page, step, state, elementMap, policy) {
   const urlBefore   = page.url();
   const observations = await setupSignals(page, step.expectedSignals, urlBefore);
 
+  // ── Visual focus indicator (best-effort, captured by video) ──────────────
+  // 화면 녹화를 보는 사람이 "지금 어떤 요소에 액션이 들어가는지" 한눈에 알 수
+  // 있도록 캡션 + 펄스 링을 잠깐 띄웁니다. goto/스크롤처럼 navigation 이
+  // 발생하는 스텝은 어차피 직후 페이지가 갈아엎이므로 페이지 컨텍스트
+  // 손실에 안전한 best-effort 호출입니다.
+  await showStepFocus(page, step, locator);
+
   // ── Run the step handler ─────────────────────────────────────────────────
   let handlerResult;
   try {
-    handlerResult = await handler(page, step, state, elementMap, policy, locator);
+    handlerResult = await handler(page, step, state, elementMap, policy, locator, ctx);
   } catch (e) {
     const { code, message } = normalizePlaywrightError(e);
     handlerResult = {

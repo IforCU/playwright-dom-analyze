@@ -56,6 +56,7 @@ import { jobOutputDir, toRelPath }       from '../utils.js';
 import { attemptGenericLogin }           from './authFlow.js';
 import { runPreAuthBootstrap }           from './authBootstrap.js';
 import { writeCrawlGraphArtifacts }      from './graphVisualizer.js';
+import { processWithConcurrency }        from '../../shared/concurrencyPool.js';
 
 // ── Defaults ──────────────────────────────────────────────────────────────────
 //
@@ -76,48 +77,10 @@ const CRAWL_DEFAULTS = {
 };
 
 // ── Bounded-concurrency worker pool ───────────────────────────────────────────
-
-/**
- * Process an array of items concurrently with a bounded worker pool.
- *
- * Items are dispatched as soon as a worker slot becomes available.
- * Result array is index-stable — results[i] corresponds to items[i].
- * The provided `fn` must never throw (it should catch internally and return
- * a result object carrying the error).
- *
- * @template T, R
- * @param {T[]}   items           - work items for this frontier level
- * @param {number} maxConcurrent  - maximum simultaneous in-flight tasks (≥ 1)
- * @param {function(T, number): Promise<R>} fn  - worker; receives (item, slotIndex)
- * @returns {Promise<R[]>}
- */
-async function _processFrontierLevel(items, maxConcurrent, fn) {
-  if (items.length === 0) return [];
-
-  let slots = Math.max(1, Math.floor(maxConcurrent));
-  const waiters = [];
-
-  function acquire() {
-    if (slots > 0) { slots--; return Promise.resolve(); }
-    return new Promise((res) => waiters.push(res));
-  }
-  function release() {
-    if (waiters.length > 0) waiters.shift()();
-    else slots++;
-  }
-
-  // Promise.all preserves index order automatically.
-  return Promise.all(
-    items.map(async (item, i) => {
-      await acquire();
-      try {
-        return await fn(item, i);
-      } finally {
-        release();
-      }
-    })
-  );
-}
+// Implementation moved to src/core/shared/concurrencyPool.js so that the QA
+// execution engine can reuse the same primitive for parallel scenarios.
+// Local alias preserved for readability of historical call sites.
+const _processFrontierLevel = processWithConcurrency;
 
 // ── Public API ────────────────────────────────────────────────────────────────
 

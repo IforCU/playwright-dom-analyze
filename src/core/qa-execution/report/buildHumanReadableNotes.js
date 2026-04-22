@@ -8,8 +8,9 @@
  * @returns {string[]}
  */
 const STATUS_KO = {
-  passed: '통과',
-  failed: '실패',
+  passed:  '통과',
+  partial: '부분 성공',
+  failed:  '실패',
   skipped: '건너뜀',
   blocked: '차단됨',
 };
@@ -30,6 +31,21 @@ export function buildNotes(scenario, status, summary, stepResults) {
   }
   if (summary.fallbackLocatorUsageCount > 0) {
     notes.push(`폴백 로케이터 사용 ${summary.fallbackLocatorUsageCount}회 — 분석 데이터 업데이트를 권장합니다.`);
+  }
+  if (summary.retried > 0) {
+    const retriedSteps = stepResults
+      .filter(r => r.status === 'retried_then_passed')
+      .map(r => `"${r.stepId ?? r.type}"`)
+      .join(', ');
+    notes.push(`재시도/완화 통과 스텝 ${summary.retried}개: ${retriedSteps}`);
+
+    // Surface soft-pass (matcher returned `partial: true`) reasons explicitly.
+    const partialReasons = stepResults
+      .filter(r => r.status === 'retried_then_passed' && r.assertionResult?.partialReason)
+      .map(r => `"${r.stepId ?? r.type}": ${r.assertionResult.partialReason}`);
+    for (const reason of partialReasons) {
+      notes.push(`부분 성공 사유 — ${reason}`);
+    }
   }
   if (summary.assertionPassedCount > 0 || summary.assertionFailedCount > 0) {
     notes.push(`검증(assertion): 통과 ${summary.assertionPassedCount}, 실패 ${summary.assertionFailedCount}`);

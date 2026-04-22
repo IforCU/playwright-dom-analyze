@@ -18,8 +18,10 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app  = express();
 const PORT = process.env.PORT || 3000;
 
-// Parse incoming JSON request bodies
-app.use(express.json());
+// Parse incoming JSON request bodies.
+// Limit raised to 50 MB to accommodate large analysisReport payloads
+// (final-report.json for sites with many triggers can exceed the default 100 KB).
+app.use(express.json({ limit: '50mb' }));
 
 // Serve the request UI from public/
 app.use(express.static(path.join(__dirname, '..', 'public')));

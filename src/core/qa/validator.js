@@ -64,7 +64,7 @@ export function validateSuite(suite) {
   // ── Suite-level required fields ─────────────────────────────────────────────
   if (!suite.suiteId)   errors.push('[suite] Missing required field: suiteId');
   if (!suite.scenarios) errors.push('[suite] Missing required field: scenarios');
-  if (!suite.environment?.baseURL) warnings.push('[suite] environment.baseURL is not set; relative goto URLs may fail');
+  if (!suite.environment?.baseURL && !suite.baseURL) warnings.push('[suite] baseURL is not set (environment.baseURL or baseURL); relative goto URLs may fail');
 
   if (!Array.isArray(suite.scenarios)) {
     errors.push('[suite] "scenarios" must be an array');
